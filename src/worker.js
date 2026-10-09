@@ -94,6 +94,18 @@ export default {
         try { vapid = (await getVapid(env)).publicKey; } catch {}
         return json({ supabaseUrl: env.SUPABASE_URL, supabaseKey: env.SUPABASE_ANON_KEY, vapidPublicKey: vapid });
       }
+      if (path === '/api/health') {
+        // Shows whether each connected service works (never shows any keys).
+        const check = async (fn) => { try { await fn(); return 'ok'; } catch (e) { return String(e.message || e).slice(0, 200); } };
+        return json({
+          database: await check(() => rpc(env, 'get_secret', { p_key: 'health' })),
+          push_keys: await check(() => getVapid(env)),
+          stripe: await check(() => stripe(env, 'GET', '/balance')),
+          stripe_mode: String(env.STRIPE_SECRET_KEY || '').startsWith('sk_live') ? 'live' : 'test',
+          email_configured: Boolean(env.GMAIL_USER && env.GMAIL_APP_PASSWORD),
+          site_url: siteUrl(env),
+        });
+      }
       if (path === '/api/checkout' && request.method === 'POST') return await checkout(request, env);
       if (path === '/api/stripe-webhook' && request.method === 'POST') return await webhook(request, env, ctx);
       if (path === '/api/latest' && request.method === 'POST') {

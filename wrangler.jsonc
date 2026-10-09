@@ -3,7 +3,7 @@
 // they are added in the Cloudflare dashboard under the worker's Settings → Variables and Secrets.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "friday-soccer",
+  "name": "signup",
   "main": "src/worker.js",
   "compatibility_date": "2026-09-01",
   "workers_dev": true,
@@ -19,7 +19,7 @@
   "vars": {
     "SUPABASE_URL": "https://hubdlmygtqqfomrxkges.supabase.co",
     "SUPABASE_ANON_KEY": "sb_publishable_tNmPMu4fsMJITMips3iM9w_ZlAiIe-a",
-    "SITE_URL": "https://friday-soccer.emmaklins.workers.dev",
+    "SITE_URL": "https://signup.midwestfc.workers.dev",
     "GMAIL_USER": "ackerman.elitesoccer@gmail.com"
   },
   "keep_vars": true

@@ -1,0 +1,26 @@
+// Cloudflare settings for the Friday Soccer website + server.
+// Secrets (SUPABASE_SERVICE_KEY, STRIPE_SECRET_KEY, GMAIL_APP_PASSWORD) are NOT in this file;
+// they are added in the Cloudflare dashboard under the worker's Settings → Variables and Secrets.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "friday-soccer",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "observability": { "enabled": true },
+  "vars": {
+    "SUPABASE_URL": "https://hubdlmygtqqfomrxkges.supabase.co",
+    "SUPABASE_ANON_KEY": "sb_publishable_tNmPMu4fsMJITMips3iM9w_ZlAiIe-a",
+    "SITE_URL": "",
+    "GMAIL_USER": ""
+  },
+  "keep_vars": true
+}

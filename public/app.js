@@ -141,7 +141,7 @@ function renderSignIn(step = 'email', error = '') {
       <form class="card" id="f">
         <label for="email">Your email</label>
         <input id="email" type="email" inputmode="email" autocomplete="email" required placeholder="you@example.com" value="${esc(S.email)}">
-        <p class="muted small">We'll email you a code. No password needed.</p>
+        <p class="muted small">We'll email you a sign-in code. No password needed.</p>
         <button class="btn" type="submit">Send my code</button>
         <div class="err">${esc(error)}</div>
       </form>`;
@@ -165,7 +165,7 @@ function renderSignIn(step = 'email', error = '') {
       <div class="err">${esc(error)}</div>
       <p class="center small"><button class="linkbtn" type="button" id="back">Use a different email</button>
       · <button class="linkbtn" type="button" id="again">Send a new code</button></p>
-      <p class="muted small center">Can't find it? Check your spam folder.</p>
+      <p class="muted small center">If the email has a sign-in link instead of a code, just tap the link. Can't find it? Check your spam folder.</p>
     </form>`;
   const f = document.getElementById('f');
   f.code.focus();
@@ -623,4 +623,14 @@ async function adminHistory(shell) {
 // ---------- start ----------
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 S.session = stored('fs_session');
+// Signing in from the link in the email: the sign-in details arrive in the address bar.
+if (location.hash.includes('access_token=')) {
+  const p = new URLSearchParams(location.hash.slice(1));
+  setSession({ access_token: p.get('access_token'), refresh_token: p.get('refresh_token'), expires_in: Number(p.get('expires_in') || 3600) });
+  history.replaceState(null, '', '/');
+} else if (location.hash.includes('error_description=')) {
+  const p = new URLSearchParams(location.hash.slice(1));
+  history.replaceState(null, '', '/');
+  setTimeout(() => toast(p.get('error_description') || 'That sign-in link didn\'t work. Please request a new one.', 6000), 300);
+}
 route();

@@ -103,7 +103,7 @@ export default {
           stripe: await check(() => stripe(env, 'GET', '/balance')),
           stripe_mode: String(env.STRIPE_SECRET_KEY || '').startsWith('sk_live') ? 'live' : 'test',
           supabase_key_kind: (() => {
-            const k = String(env.SUPABASE_SERVICE_KEY || '').trim();
+            const k = String(env.SUPABASE_SERVICE_KEY || '').replace(/\s+/g, '');
             if (!k) return 'missing';
             if (k.includes('•') || k.includes('...') || k.includes('…')) return 'looks shortened (copied while hidden)';
             if (k.startsWith('sb_publishable_')) return 'publishable key (wrong key, need the secret one)';

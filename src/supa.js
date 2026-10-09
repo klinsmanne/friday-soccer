@@ -1,7 +1,7 @@
 // Talking to the Supabase database from the server.
 
 function serviceHeaders(env) {
-  const key = String(env.SUPABASE_SERVICE_KEY || '').trim();
+  const key = String(env.SUPABASE_SERVICE_KEY || '').replace(/\s+/g, '');
   if (!key) throw new Error('SUPABASE_SERVICE_KEY is not set');
   const h = { apikey: key, 'Content-Type': 'application/json' };
   // Older-style keys are JWTs and also go in the Authorization header; new "sb_secret_" keys must not.

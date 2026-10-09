@@ -19,7 +19,7 @@
   "vars": {
     "SUPABASE_URL": "https://hubdlmygtqqfomrxkges.supabase.co",
     "SUPABASE_ANON_KEY": "sb_publishable_tNmPMu4fsMJITMips3iM9w_ZlAiIe-a",
-    "SITE_URL": "",
+    "SITE_URL": "https://friday-soccer.emmaklins.workers.dev",
     "GMAIL_USER": "ackerman.elitesoccer@gmail.com"
   },
   "keep_vars": true

@@ -102,6 +102,15 @@ export default {
           push_keys: await check(() => getVapid(env)),
           stripe: await check(() => stripe(env, 'GET', '/balance')),
           stripe_mode: String(env.STRIPE_SECRET_KEY || '').startsWith('sk_live') ? 'live' : 'test',
+          supabase_key_kind: (() => {
+            const k = String(env.SUPABASE_SERVICE_KEY || '').trim();
+            if (!k) return 'missing';
+            if (k.includes('•') || k.includes('...') || k.includes('…')) return 'looks shortened (copied while hidden)';
+            if (k.startsWith('sb_publishable_')) return 'publishable key (wrong key, need the secret one)';
+            if (k.startsWith('sb_secret_')) return `secret key, ${k.length} characters`;
+            if (k.startsWith('eyJ')) return 'legacy key';
+            return 'unrecognized';
+          })(),
           email_configured: Boolean(env.GMAIL_USER && env.GMAIL_APP_PASSWORD),
           site_url: siteUrl(env),
         });

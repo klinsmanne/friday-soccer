@@ -12,7 +12,7 @@
 
 create table if not exists public.settings (
   id                    int primary key default 1 check (id = 1),
-  admin_email           text not null default '(owner account)',
+  admin_email           text not null default 'organizer@example.com',   -- organizer email(s), comma-separated
   location              text not null default 'Ackerman Soccer',
   price_cents           int  not null default 805 check (price_cents >= 50),
   max_players           int  not null default 18 check (max_players between 2 and 100),
@@ -358,12 +358,18 @@ end $$;
 -- Accounts
 -- ---------------------------------------------------------------------
 
+-- Is this email one of the organizer emails in settings? (comma-separated list)
+create or replace function public.is_organizer_email(p_email text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select lower(trim(coalesce(p_email, ''))) <> '' and lower(trim(coalesce(p_email, ''))) = any (
+    select lower(trim(x)) from settings, unnest(string_to_array(admin_email, ',')) x where id = 1) $$;
+
 create or replace function public.handle_new_user() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
   insert into profiles (id, email, is_admin)
   values (new.id, coalesce(new.email, ''),
-          lower(coalesce(new.email,'')) = (select lower(admin_email) from settings where id = 1))
+          is_organizer_email(new.email))
   on conflict (id) do nothing;
   return new;
 end $$;
@@ -381,7 +387,7 @@ begin
   if not found then
     select email into em from auth.users where id = uid;
     insert into profiles (id, email, is_admin)
-    values (uid, coalesce(em,''), lower(coalesce(em,'')) = (select lower(admin_email) from settings where id = 1))
+    values (uid, coalesce(em,''), is_organizer_email(em))
     on conflict (id) do nothing;
     select * into p from profiles where id = uid;
   end if;
@@ -1092,6 +1098,16 @@ begin
   return jsonb_build_object('ok', true);
 end $$;
 
+-- Make someone an organizer (or remove them). Organizers see the Organizer dashboard.
+create or replace function public.admin_set_organizer(p_user uuid, p_on boolean) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare a profiles := require_admin();
+begin
+  if p_user = a.id and not p_on then raise exception 'You can''t remove yourself as organizer.'; end if;
+  update profiles set is_admin = p_on where id = p_user;
+  return jsonb_build_object('ok', true);
+end $$;
+
 create or replace function public.admin_games() returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare a profiles := require_admin();
@@ -1148,4 +1164,5 @@ grant execute on function public.admin_update_settings(jsonb)       to authentic
 grant execute on function public.admin_message(text, text)          to authenticated;
 grant execute on function public.admin_block(uuid, boolean)         to authenticated;
 grant execute on function public.admin_games()                      to authenticated;
+grant execute on function public.admin_set_organizer(uuid, boolean) to authenticated;
 grant execute on function public.admin_payments()                   to authenticated;

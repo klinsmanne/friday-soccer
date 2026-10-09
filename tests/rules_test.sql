@@ -11,11 +11,11 @@ set client_min_messages = notice;
 -- 22 players with finished profiles. Player 1 is the organizer.
 insert into auth.users (id, email)
 select ('00000000-0000-0000-0000-' || lpad(i::text, 12, '0'))::uuid,
-       case when i = 1 then '(owner account)' else 'player' || i || '@example.com' end
+       case when i = 1 then 'organizer@example.com' else 'player' || i || '@example.com' end
 from generate_series(1, 22) i;
 -- (profiles are created automatically by the sign-up trigger)
 update profiles set full_name = 'Player ' || right(id::text, 2)::int, waiver_accepted_at = now();
-select pg_temp.check((select is_admin from profiles where email = '(owner account)')
+select pg_temp.check((select is_admin from profiles where email = 'organizer@example.com')
                      and (select count(*) = 1 from profiles where is_admin), 'organizer recognized by email');
 
 create or replace function pg_temp.u(i int) returns uuid language sql as
@@ -163,5 +163,16 @@ exception when others then if sqlerrm like 'FAILED%' then raise; end if; raise n
 select task_done(id, true, 'released', 805, 're_x', null) from stripe_tasks where registration_id = (pg_temp.reg(3)).id;
 select pg_temp.check((pg_temp.reg(3)).pay_state = 'released', 'release recorded');
 select pg_temp.check((select count(*) = 1 from outbox where user_id = pg_temp.u(3) and kind = 'refund_issued'), 'player told about refund');
+
+-- 18. Organizer can add another organizer; players can't
+select set_config('request.jwt.claim.sub', pg_temp.u(1)::text, false);
+select admin_set_organizer(pg_temp.u(10), true);
+select pg_temp.check((select is_admin from profiles where id = pg_temp.u(10)), 'organizer can add a second organizer');
+select set_config('request.jwt.claim.sub', pg_temp.u(11)::text, false);
+do $$ begin perform admin_set_organizer(pg_temp.u(11), true); raise exception 'FAILED: player made themselves organizer';
+exception when others then if sqlerrm like 'FAILED%' then raise; end if; raise notice 'ok - players cannot make themselves organizer'; end $$;
+update settings set admin_email = 'organizer@example.com, second@example.com';
+insert into auth.users (email) values ('Second@Example.com');
+select pg_temp.check((select is_admin from profiles where email = 'Second@Example.com'), 'organizer email list (comma-separated, any capitalization) works');
 
 select 'ALL RULE TESTS PASSED' as result;

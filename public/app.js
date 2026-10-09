@@ -553,9 +553,22 @@ async function adminPlayers(shell) {
     <input type="text" id="q" placeholder="Search name or email" style="margin-bottom:8px">
     <div id="pl">${players.map((p) => `<div class="row-item" data-q="${esc(((p.name || '') + ' ' + p.email).toLowerCase())}">
       <div class="who"><b>${esc(p.name || '(no name yet)')}</b><span>${esc(p.email)}${p.phone ? ' · ' + esc(p.phone) : ''} · ${p.games_played} game(s)</span></div>
-      ${p.is_admin ? '<span class="tag">Organizer</span>' : `<button class="mini ${p.blocked ? '' : 'bad'}" data-block="${p.id}" data-on="${p.blocked ? 0 : 1}">${p.blocked ? 'Unblock' : 'Block'}</button>`}
+      ${p.is_admin
+        ? `<span class="tag">Organizer</span>${p.id === S.home.me.id ? '' : `<button class="mini" data-org="${p.id}" data-on="0" data-name="${esc(p.name || p.email)}">Remove</button>`}`
+        : `<button class="mini" data-org="${p.id}" data-on="1" data-name="${esc(p.name || p.email)}">Make organizer</button>
+           <button class="mini ${p.blocked ? '' : 'bad'}" data-block="${p.id}" data-on="${p.blocked ? 0 : 1}">${p.blocked ? 'Unblock' : 'Block'}</button>`}
     </div>`).join('')}</div>
-    <p class="muted small">Blocked people can still sign in but can't sign up for games. To take someone off this week's list, use "This game".</p></section>`);
+    <p class="muted small">Organizers see this dashboard and can manage games. Blocked people can still sign in but can't sign up for games. To take someone off this week's list, use "This game".</p></section>`);
+  app.querySelectorAll('[data-org]').forEach((el) => {
+    el.onclick = async () => {
+      const on = el.dataset.on === '1';
+      const ok = await modal({ title: on ? `Make ${el.dataset.name} an organizer?` : `Remove ${el.dataset.name} as organizer?`,
+        text: on ? 'They\'ll be able to remove players, refund, cancel games and change settings.' : 'They\'ll go back to the normal player view.',
+        buttons: [{ label: on ? 'Make organizer' : 'Remove organizer', cls: on ? 'dark' : 'danger', value: true }, { label: 'Cancel', cls: 'secondary', value: false }] });
+      if (!ok) return;
+      try { await rpc('admin_set_organizer', { p_user: el.dataset.org, p_on: on }); toast('Updated'); adminPlayers(shell); } catch (e) { toast(e.message); }
+    };
+  });
   document.getElementById('q').oninput = (e) => {
     const q = e.target.value.toLowerCase();
     app.querySelectorAll('#pl .row-item').forEach((el) => { el.style.display = el.dataset.q.includes(q) ? '' : 'none'; });

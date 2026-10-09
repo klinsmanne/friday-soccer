@@ -1,4 +1,4 @@
-# Friday Soccer (Midwest FC) — sign-up app
+# Midwest FC — members sign-up app
 
 Website: **https://signup.midwestfc.workers.dev**
 Status check: https://signup.midwestfc.workers.dev/api/health — every line should say `ok` (never shows any keys).

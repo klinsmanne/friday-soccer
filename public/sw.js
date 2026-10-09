@@ -7,7 +7,7 @@ self.addEventListener('fetch', () => {});
 
 self.addEventListener('push', (event) => {
   event.waitUntil((async () => {
-    let msg = { title: 'Friday Soccer', body: 'Open the app for the latest update.' };
+    let msg = { title: 'Midwest FC', body: 'Open the app for the latest update.' };
     try {
       const sub = await self.registration.pushManager.getSubscription();
       const res = await fetch('/api/latest', {

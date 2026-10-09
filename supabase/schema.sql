@@ -1,5 +1,5 @@
 -- =====================================================================
--- Friday Soccer — database schema and game rules
+-- Midwest FC — database schema and game rules
 -- Paste this whole file into Supabase → SQL Editor → Run.
 -- It is safe to run again: it updates functions in place and only
 -- creates tables that don't exist yet.
@@ -10,30 +10,44 @@
 -- Tables
 -- ---------------------------------------------------------------------
 
+-- Club-wide settings (one row).
 create table if not exists public.settings (
-  id                    int primary key default 1 check (id = 1),
-  admin_email           text not null default 'organizer@example.com',   -- organizer email(s), comma-separated
+  id                  int primary key default 1 check (id = 1),
+  club_name           text not null default 'Midwest FC',
+  admin_email         text not null default 'organizer@example.com',   -- organizer email(s), comma-separated
+  hold_minutes        int  not null default 10 check (hold_minutes between 5 and 60),
+  offer_minutes       int  not null default 120 check (offer_minutes between 10 and 1440),
+  late_offer_minutes  int  not null default 30 check (late_offer_minutes between 5 and 240),
+  late_window_hours   int  not null default 6 check (late_window_hours between 0 and 72),
+  quiet_start         time not null default '22:00',
+  quiet_end           time not null default '09:00',
+  reminder_time       time not null default '09:00',
+  updated_at          timestamptz not null default now()
+);
+insert into public.settings (id) values (1) on conflict (id) do nothing;
+
+-- Game categories (Friday Games, Wednesday Games, …) with the defaults new games use.
+create table if not exists public.categories (
+  id                    text primary key,                -- 'friday', 'wednesday'
+  name                  text not null,                   -- 'Friday Games'
+  badge                 text not null,                   -- 'FRI'
+  sort                  int  not null default 0,
+  active                boolean not null default true,
   location              text not null default 'Ackerman Soccer',
   price_cents           int  not null default 805 check (price_cents >= 50),
   max_players           int  not null default 18 check (max_players between 2 and 100),
-  kickoff_dow           int  not null default 5 check (kickoff_dow between 0 and 6),   -- 0=Sun … 6=Sat
   kickoff_time          time not null default '22:00',
   duration_minutes      int  not null default 90 check (duration_minutes between 15 and 600),
-  opens_dow             int  not null default 1 check (opens_dow between 0 and 6),
-  opens_time            time not null default '09:00',
+  opens_dow             int  not null default 1 check (opens_dow between 0 and 6),   -- 0=Sun … 6=Sat
+  opens_time            time not null default '14:00',
   close_minutes_before  int  not null default 120 check (close_minutes_before between 0 and 2880),
   drop_deadline_dow     int  not null default 4 check (drop_deadline_dow between 0 and 6),
-  drop_deadline_time    time not null default '20:00',
-  hold_minutes          int  not null default 10 check (hold_minutes between 5 and 60),
-  offer_minutes         int  not null default 120 check (offer_minutes between 10 and 1440),
-  late_offer_minutes    int  not null default 30 check (late_offer_minutes between 5 and 240),
-  late_window_hours     int  not null default 6 check (late_window_hours between 0 and 72),
-  quiet_start           time not null default '22:00',
-  quiet_end             time not null default '09:00',
-  reminder_time         time not null default '09:00',
-  updated_at            timestamptz not null default now()
+  drop_deadline_time    time not null default '20:00'
 );
-insert into public.settings (id) values (1) on conflict (id) do nothing;
+insert into public.categories (id, name, badge, sort, kickoff_time, opens_dow, opens_time, drop_deadline_dow, drop_deadline_time)
+values ('friday', 'Friday Games', 'FRI', 1, '22:00', 1, '14:00', 4, '20:00'),
+       ('wednesday', 'Wednesday Games', 'WED', 2, '20:00', 1, '14:00', 2, '20:00')
+on conflict (id) do nothing;
 
 create table if not exists public.profiles (
   id                  uuid primary key references auth.users (id) on delete cascade,
@@ -46,9 +60,21 @@ create table if not exists public.profiles (
   created_at          timestamptz not null default now()
 );
 
+-- Who is an approved member of which category. Only the organizer approves.
+create table if not exists public.memberships (
+  user_id       uuid not null references public.profiles (id) on delete cascade,
+  category_id   text not null references public.categories (id) on delete cascade,
+  status        text not null check (status in ('pending','approved','declined','removed')),
+  requested_at  timestamptz not null default now(),
+  decided_at    timestamptz,
+  decided_by    uuid references public.profiles (id) on delete set null,
+  primary key (user_id, category_id)
+);
+
 create table if not exists public.games (
   id                bigint generated always as identity primary key,
-  kickoff_at        timestamptz not null unique,
+  category_id       text not null references public.categories (id),
+  kickoff_at        timestamptz not null,
   ends_at           timestamptz not null,
   location          text not null,
   price_cents       int  not null,
@@ -62,8 +88,10 @@ create table if not exists public.games (
   reminder_sent     boolean not null default false,
   captured_at       timestamptz,
   closed_processed  boolean not null default false,
-  created_at        timestamptz not null default now()
+  created_at        timestamptz not null default now(),
+  unique (category_id, kickoff_at)
 );
+create index if not exists games_upcoming on public.games (ends_at, kickoff_at);
 
 create table if not exists public.registrations (
   id                   bigint generated always as identity primary key,
@@ -71,7 +99,7 @@ create table if not exists public.registrations (
   user_id              uuid   not null references public.profiles (id) on delete cascade,
   status               text   not null check (status in
                          ('holding','confirmed','waitlisted','offered','dropped','expired','removed','cancelled')),
-  sort_at              timestamptz not null default now(),   -- first-come order (admin can reorder)
+  sort_at              timestamptz not null default now(),   -- first-come order (organizer can reorder)
   created_at           timestamptz not null default now(),
   hold_expires_at      timestamptz,
   offer_started_at     timestamptz,
@@ -150,7 +178,9 @@ create table if not exists public.app_secrets (
 -- Lock every table down: the website never reads tables directly,
 -- only through the functions below.
 alter table public.settings            enable row level security;
+alter table public.categories          enable row level security;
 alter table public.profiles            enable row level security;
+alter table public.memberships         enable row level security;
 alter table public.games               enable row level security;
 alter table public.registrations       enable row level security;
 alter table public.payment_events      enable row level security;
@@ -245,40 +275,40 @@ language sql stable as $$
   select count(*)::int from public.registrations
   where game_id = p_game and status in ('holding','confirmed','offered') $$;
 
--- The current game: the next one that hasn't finished. Creates it if needed.
-create or replace function public.ensure_next_game() returns public.games
-language plpgsql security definer set search_path = public as $$
-declare
-  s settings; g games; d date; base date; k timestamptz; i int;
+create or replace function public.cat_name(p_category text) returns text
+language sql stable security definer set search_path = public as $$
+  select coalesce((select name from categories where id = p_category), 'Games') $$;
+
+-- Creates one game in a category on a date, using the category's defaults
+-- (sign-ups open on the category's opening weekday before the game, etc.).
+create or replace function public.make_game(p_category text, p_date date, p_time time default null)
+returns public.games language plpgsql security definer set search_path = public as $$
+declare c categories; g games; k timestamptz; dow int; opens timestamptz; dl timestamptz;
 begin
-  select * into g from games where ends_at > now() order by kickoff_at limit 1;
-  if found then return g; end if;
-
-  select * into s from settings where id = 1;
-  d := (now() at time zone tz())::date;
-  for i in 0..7 loop
-    if extract(dow from d + i)::int = s.kickoff_dow
-       and local_ts(d + i, s.kickoff_time) + make_interval(mins => s.duration_minutes) > now() then
-      base := d + i;
-      exit;
-    end if;
-  end loop;
-  k := local_ts(base, s.kickoff_time);
-
-  insert into games (kickoff_at, ends_at, location, price_cents, max_players,
+  select * into c from categories where id = p_category;
+  if not found then raise exception 'Unknown game category.'; end if;
+  k := local_ts(p_date, coalesce(p_time, c.kickoff_time));
+  dow := extract(dow from p_date)::int;
+  opens := local_ts(p_date - ((7 + dow - c.opens_dow) % 7), c.opens_time);
+  if opens >= k then opens := opens - interval '7 days'; end if;
+  dl := local_ts(p_date - ((7 + dow - c.drop_deadline_dow) % 7), c.drop_deadline_time);
+  if dl >= k - make_interval(mins => c.close_minutes_before) then
+    dl := k - make_interval(mins => c.close_minutes_before) - interval '1 day';
+  end if;
+  insert into games (category_id, kickoff_at, ends_at, location, price_cents, max_players,
                      opens_at, closes_at, drop_deadline_at)
-  values (k,
-          k + make_interval(mins => s.duration_minutes),
-          s.location, s.price_cents, s.max_players,
-          local_ts(base - ((7 + s.kickoff_dow - s.opens_dow) % 7), s.opens_time),
-          k - make_interval(mins => s.close_minutes_before),
-          local_ts(base - ((7 + s.kickoff_dow - s.drop_deadline_dow) % 7), s.drop_deadline_time))
-  on conflict (kickoff_at) do nothing
+  values (p_category, k, k + make_interval(mins => c.duration_minutes), c.location, c.price_cents, c.max_players,
+          opens, k - make_interval(mins => c.close_minutes_before), dl)
+  on conflict (category_id, kickoff_at) do nothing
   returning * into g;
-
-  if g.id is null then select * into g from games where kickoff_at = k; end if;
+  if g.id is null then select * into g from games where category_id = p_category and kickoff_at = k; end if;
   return g;
 end $$;
+
+-- The next game in a category that hasn't finished yet (null if none scheduled).
+create or replace function public.next_game(p_category text) returns public.games
+language sql stable security definer set search_path = public as $$
+  select * from games where category_id = p_category and ends_at > now() order by kickoff_at limit 1 $$;
 
 create or replace function public.offer_deadline(g public.games, start timestamptz) returns timestamptz
 language plpgsql stable as $$
@@ -348,14 +378,14 @@ begin
      returning * into nxt;
     perform notify(nxt.user_id, 'spot_offered',
       'A spot opened up for you! ⚽',
-      'A spot opened up for ' || fmt_day(g.kickoff_at) || '. Pay ' || fmt_money(g.price_cents) ||
+      'A spot opened up in ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || '. Pay ' || fmt_money(g.price_cents) ||
       ' by ' || fmt_time(nxt.offer_expires_at) || ' (' || fmt_day(nxt.offer_expires_at) ||
       ') to claim it, or it goes to the next person. (The clock pauses 10 PM – 9 AM.)');
   end loop;
 end $$;
 
 -- ---------------------------------------------------------------------
--- Accounts
+-- Accounts and memberships
 -- ---------------------------------------------------------------------
 
 -- Is this email one of the organizer emails in settings? (comma-separated list)
@@ -368,8 +398,7 @@ create or replace function public.handle_new_user() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
   insert into profiles (id, email, is_admin)
-  values (new.id, coalesce(new.email, ''),
-          is_organizer_email(new.email))
+  values (new.id, coalesce(new.email, ''), is_organizer_email(new.email))
   on conflict (id) do nothing;
   return new;
 end $$;
@@ -402,20 +431,59 @@ begin
   return p;
 end $$;
 
-create or replace function public.save_profile(p_full_name text, p_phone text, p_accept_waiver boolean)
+-- Organizers count as members of every category.
+create or replace function public.is_member(p_user uuid, p_category text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from profiles where id = p_user and is_admin)
+      or exists (select 1 from memberships where user_id = p_user and category_id = p_category and status = 'approved') $$;
+
+create or replace function public.badges_of(p_user uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(c.badge order by c.sort), '[]'::jsonb)
+    from memberships m join categories c on c.id = m.category_id
+   where m.user_id = p_user and m.status = 'approved' $$;
+
+-- Ask to join a category. Organizers are told; they approve in the Members screen.
+create or replace function public.request_membership(p_category text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare p profiles := me(); c categories; m memberships;
+begin
+  select * into c from categories where id = p_category and active;
+  if not found then raise exception 'That game group isn''t available.'; end if;
+  select * into m from memberships where user_id = p.id and category_id = p_category;
+  if m.status in ('pending','approved') then return jsonb_build_object('status', m.status); end if;
+  insert into memberships (user_id, category_id, status, requested_at, decided_at, decided_by)
+  values (p.id, p_category, 'pending', now(), null, null)
+  on conflict (user_id, category_id) do update
+    set status = 'pending', requested_at = now(), decided_at = null, decided_by = null;
+  perform notify_admins('membership_request', 'New member request',
+    coalesce(p.full_name, p.email) || ' (' || p.email || ') asked to join ' || c.name ||
+    '. Approve or decline in the app under Organizer → Members.');
+  return jsonb_build_object('status', 'pending');
+end $$;
+
+create or replace function public.save_profile(p_full_name text, p_phone text, p_accept_waiver boolean,
+                                               p_request text[] default null)
 returns jsonb language plpgsql security definer set search_path = public as $$
-declare p profiles := me();
+declare p profiles := me(); cat text;
 begin
   if coalesce(length(trim(p_full_name)), 0) < 2 then raise exception 'Please enter your full name.'; end if;
   if length(trim(p_full_name)) > 60 then raise exception 'That name is too long.'; end if;
   if p.waiver_accepted_at is null and not coalesce(p_accept_waiver, false) then
     raise exception 'Please accept the waiver to play.';
   end if;
+  if not p.is_admin and coalesce(array_length(p_request, 1), 0) = 0
+     and not exists (select 1 from memberships where user_id = p.id and status in ('pending','approved')) then
+    raise exception 'Please choose which games you want to join.';
+  end if;
   update profiles
      set full_name = trim(p_full_name),
          phone = nullif(left(trim(coalesce(p_phone,'')), 30), ''),
          waiver_accepted_at = coalesce(waiver_accepted_at, case when p_accept_waiver then now() end)
    where id = p.id;
+  foreach cat in array coalesce(p_request, '{}'::text[]) loop
+    perform request_membership(cat);
+  end loop;
   return jsonb_build_object('ok', true);
 end $$;
 
@@ -426,7 +494,9 @@ end $$;
 create or replace function public.game_json(g public.games) returns jsonb
 language sql stable security definer set search_path = public as $$
   select jsonb_build_object(
-    'id', g.id, 'phase', game_phase(g),
+    'id', g.id, 'phase', game_phase(g), 'category_id', g.category_id,
+    'category', (select name from categories where id = g.category_id),
+    'badge', (select badge from categories where id = g.category_id),
     'kickoff_at', g.kickoff_at, 'ends_at', g.ends_at, 'location', g.location,
     'price_cents', g.price_cents, 'max_players', g.max_players,
     'opens_at', g.opens_at, 'closes_at', g.closes_at, 'drop_deadline_at', g.drop_deadline_at,
@@ -436,14 +506,13 @@ language sql stable security definer set search_path = public as $$
     'waitlist_count', (select count(*) from registrations where game_id = g.id and status in ('waitlisted','offered'))
   ) $$;
 
-create or replace function public.get_home() returns jsonb
-language plpgsql security definer set search_path = public as $$
-declare
-  p profiles := me(); g games; r registrations; pos int;
+-- Everything about one game for one player: the game, their place, the lists.
+create or replace function public.game_view(g public.games, p_user uuid) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare r registrations; pos int;
 begin
-  g := ensure_next_game();
   select * into r from registrations
-    where game_id = g.id and user_id = p.id
+    where game_id = g.id and user_id = p_user
     order by (status in ('holding','confirmed','waitlisted','offered')) desc, id desc limit 1;
   if r.status in ('waitlisted','offered') then
     select count(*) + 1 into pos from registrations
@@ -451,25 +520,51 @@ begin
         and (sort_at, id) < (r.sort_at, r.id);
   end if;
   return jsonb_build_object(
-    'server_now', now(),
-    'me', jsonb_build_object('id', p.id, 'email', p.email, 'full_name', p.full_name, 'phone', p.phone,
-                             'waiver', p.waiver_accepted_at is not null, 'is_admin', p.is_admin, 'blocked', p.blocked),
     'game', game_json(g),
     'my', case when r.id is null then null else jsonb_build_object(
             'id', r.id, 'status', r.status, 'position', pos, 'pay_state', r.pay_state,
             'hold_expires_at', r.hold_expires_at, 'offer_expires_at', r.offer_expires_at,
             'checkout_url', r.checkout_url, 'late_drop_refund', r.late_drop_refund, 'is_manual', r.is_manual) end,
-    'confirmed', coalesce((select jsonb_agg(jsonb_build_object('name', coalesce(pr.full_name, 'Player'), 'me', pr.id = p.id)
+    'confirmed', coalesce((select jsonb_agg(jsonb_build_object('name', coalesce(pr.full_name, 'Player'), 'me', pr.id = p_user,
+                                                              'badges', badges_of(pr.id))
                                             order by x.sort_at, x.id)
                              from registrations x join profiles pr on pr.id = x.user_id
                             where x.game_id = g.id and x.status = 'confirmed'), '[]'::jsonb),
     'paying_count', (select count(*) from registrations where game_id = g.id and status = 'holding'),
-    'waitlist', coalesce((select jsonb_agg(jsonb_build_object('name', coalesce(pr.full_name, 'Player'), 'me', pr.id = p.id,
-                                                             'offered', x.status = 'offered')
+    'waitlist', coalesce((select jsonb_agg(jsonb_build_object('name', coalesce(pr.full_name, 'Player'), 'me', pr.id = p_user,
+                                                             'offered', x.status = 'offered', 'badges', badges_of(pr.id))
                                            order by x.sort_at, x.id)
                             from registrations x join profiles pr on pr.id = x.user_id
-                           where x.game_id = g.id and x.status in ('waitlisted','offered')), '[]'::jsonb)
-  );
+                           where x.game_id = g.id and x.status in ('waitlisted','offered')), '[]'::jsonb));
+end $$;
+
+create or replace function public.get_home() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare p profiles := me(); sections jsonb := '[]'::jsonb; c categories; g games;
+begin
+  for c in select * from categories where active order by sort loop
+    continue when not is_member(p.id, c.id);
+    g := next_game(c.id);
+    sections := sections || jsonb_build_array(jsonb_build_object(
+      'category_id', c.id, 'category', c.name, 'badge', c.badge,
+      'view', case when g.id is null then null else game_view(g, p.id) end,
+      'upcoming', coalesce((select jsonb_agg(jsonb_build_object('id', x.id, 'kickoff_at', x.kickoff_at, 'opens_at', x.opens_at,
+                                                               'cancelled', x.cancelled_at is not null) order by x.kickoff_at)
+                              from (select * from games where category_id = c.id and ends_at > now()
+                                    order by kickoff_at offset 1 limit 12) x), '[]'::jsonb)));
+  end loop;
+  return jsonb_build_object(
+    'server_now', now(),
+    'club', (select club_name from settings where id = 1),
+    'me', jsonb_build_object('id', p.id, 'email', p.email, 'full_name', p.full_name, 'phone', p.phone,
+                             'waiver', p.waiver_accepted_at is not null, 'is_admin', p.is_admin, 'blocked', p.blocked,
+                             'badges', badges_of(p.id)),
+    'memberships', coalesce((select jsonb_agg(jsonb_build_object('category_id', c2.id, 'category', c2.name, 'badge', c2.badge,
+                                                                 'status', m.status) order by c2.sort)
+                               from categories c2 left join memberships m on m.category_id = c2.id and m.user_id = p.id
+                              where c2.active), '[]'::jsonb),
+    'pending_requests', case when p.is_admin then (select count(*) from memberships where status = 'pending') else 0 end,
+    'sections', sections);
 end $$;
 
 create or replace function public.my_history() returns jsonb
@@ -478,7 +573,7 @@ declare p profiles := me();
 begin
   return jsonb_build_object(
     'games', coalesce((select jsonb_agg(jsonb_build_object(
-                'kickoff_at', g.kickoff_at, 'location', g.location, 'status', r.status,
+                'kickoff_at', g.kickoff_at, 'category', cat_name(g.category_id), 'location', g.location, 'status', r.status,
                 'cancelled', g.cancelled_at is not null, 'pay_state', r.pay_state, 'amount_cents', r.amount_cents)
               order by g.kickoff_at desc, r.id desc)
               from registrations r join games g on g.id = r.game_id
@@ -496,24 +591,25 @@ end $$;
 -- ---------------------------------------------------------------------
 
 create or replace function public.pay_info(r public.registrations, g public.games, p public.profiles)
-returns jsonb language sql stable as $$
+returns jsonb language sql stable security definer set search_path = public as $$
   select jsonb_build_object(
     'action', 'pay', 'registration_id', r.id, 'status', r.status, 'game_id', g.id,
     'amount_cents', g.price_cents, 'email', p.email,
-    'description', 'Friday Soccer — ' || public.fmt_day(g.kickoff_at) || ', ' || public.fmt_time(g.kickoff_at) || ' at ' || g.location,
+    'description', (select club_name from settings where id = 1) || ' ' || cat_name(g.category_id) || ' — ' ||
+                   fmt_day(g.kickoff_at) || ', ' || fmt_time(g.kickoff_at) || ' at ' || g.location,
     -- Before the drop deadline we only place a hold on the card, and charge it at the deadline.
     'capture', case when now() < g.drop_deadline_at - interval '5 minutes'
                      and g.drop_deadline_at < now() + interval '6 days' then 'manual' else 'automatic' end,
     'expires_at', case when r.status = 'holding' then r.hold_expires_at else r.offer_expires_at end,
     'checkout_session_id', r.checkout_session_id, 'checkout_url', r.checkout_url) $$;
 
-create or replace function public.claim_spot(p_user uuid) returns jsonb
+create or replace function public.claim_spot(p_user uuid, p_game bigint) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare
   g games; s settings; p profiles; r registrations; ph text; pos int;
 begin
-  g := ensure_next_game();
-  select * into g from games where id = g.id for update;      -- one sign-up at a time per game
+  select * into g from games where id = p_game for update;      -- one sign-up at a time per game
+  if not found then return jsonb_build_object('error', 'That game doesn''t exist anymore.'); end if;
   select * into s from settings where id = 1;
   select * into p from profiles where id = p_user;
   if p.id is null or coalesce(trim(p.full_name), '') = '' or p.waiver_accepted_at is null then
@@ -521,6 +617,9 @@ begin
   end if;
   if p.blocked then
     return jsonb_build_object('error', 'Your account can''t sign up right now. Please contact the organizer.');
+  end if;
+  if not is_member(p_user, g.category_id) then
+    return jsonb_build_object('error', 'Only approved ' || cat_name(g.category_id) || ' members can sign up.');
   end if;
 
   ph := game_phase(g);
@@ -583,8 +682,8 @@ begin
     insert into payment_events (registration_id, game_id, user_id, kind, amount_cents, stripe_ref)
     values (r.id, g.id, r.user_id, case when p_captured then 'charged' else 'authorized' end, p_amount, p_pi);
     perform notify(r.user_id, 'payment_confirmed', 'You''re in! ✓',
-      'Your spot for ' || fmt_day(g.kickoff_at) || ' at ' || fmt_time(g.kickoff_at) || ' (' || g.location ||
-      ') is confirmed. ' || case when p_captured then fmt_money(p_amount) || ' was charged.'
+      'Your spot in ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || ' at ' || fmt_time(g.kickoff_at) ||
+      ' (' || g.location || ') is confirmed. ' || case when p_captured then fmt_money(p_amount) || ' was charged.'
         else 'Your card is on hold for ' || fmt_money(p_amount) || ' and will be charged ' ||
              fmt_day(g.drop_deadline_at) || ' at ' || fmt_time(g.drop_deadline_at) || '. Drop before then for free.' end);
 
@@ -594,7 +693,7 @@ begin
      order by ended_at, id limit 1 for update;
     if found then
       update registrations set late_drop_refund = 'refunded' where id = d.id;
-      if not give_money_back(d, 'spot was filled') then null; end if;
+      perform give_money_back(d, 'spot was filled');
     end if;
     return jsonb_build_object('result', 'confirmed');
   end if;
@@ -634,12 +733,12 @@ end $$;
 -- Dropping out
 -- ---------------------------------------------------------------------
 
-create or replace function public.drop_out() returns jsonb
+create or replace function public.drop_out(p_game bigint) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare p profiles := me(); g games; r registrations; msg text; ph text;
 begin
-  g := ensure_next_game();
-  select * into g from games where id = g.id for update;
+  select * into g from games where id = p_game for update;
+  if not found then return jsonb_build_object('message', 'That game doesn''t exist anymore.'); end if;
   select * into r from registrations
    where game_id = g.id and user_id = p.id and status in ('holding','confirmed','waitlisted','offered') for update;
   if not found then return jsonb_build_object('message', 'You''re not signed up for this game.'); end if;
@@ -675,7 +774,7 @@ begin
   end if;
   perform promote(g.id);
   perform notify_admins('admin_drop', 'Player dropped',
-    coalesce(p.full_name, p.email) || ' dropped out of ' || fmt_day(g.kickoff_at) || '.');
+    coalesce(p.full_name, p.email) || ' dropped out of ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || '.');
   return jsonb_build_object('message', msg);
 end $$;
 
@@ -683,21 +782,21 @@ end $$;
 -- Scheduled work (runs every minute)
 -- ---------------------------------------------------------------------
 
-create or replace function public.tick_db() returns jsonb
+create or replace function public.tick_game(p_game bigint) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare g games; r registrations; ph text; n_hold int := 0; n_offer int := 0;
 begin
-  g := ensure_next_game();
-  select * into g from games where id = g.id for update;
+  select * into g from games where id = p_game for update;
   ph := game_phase(g);
 
-  -- Sign-ups just opened: tell everyone.
+  -- Sign-ups just opened: tell the members of this category.
   if ph = 'open' and not g.opened_notified then
     insert into outbox (user_id, kind, title, body)
-    select id, 'signups_open', 'Sign-ups are open ⚽',
-           'Sign-ups for ' || fmt_day(g.kickoff_at) || ' at ' || fmt_time(g.kickoff_at) || ' (' || g.location ||
-           ') are open. ' || g.max_players || ' spots, first come first served.'
-      from profiles where not blocked and full_name is not null;
+    select pr.id, 'signups_open', cat_name(g.category_id) || ': sign-ups are open ⚽',
+           'Sign-ups for ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || ' at ' || fmt_time(g.kickoff_at) ||
+           ' (' || g.location || ') are open. ' || g.max_players || ' spots, first come first served.'
+      from profiles pr
+     where not pr.blocked and pr.full_name is not null and is_member(pr.id, g.category_id);
     update games set opened_notified = true where id = g.id;
   end if;
 
@@ -744,8 +843,8 @@ begin
      and (now() at time zone tz())::date = (g.kickoff_at at time zone tz())::date
      and (now() at time zone tz())::time >= (select reminder_time from settings where id = 1) then
     insert into outbox (user_id, kind, title, body)
-    select user_id, 'game_reminder', 'Game tonight ⚽',
-           'See you at ' || g.location || ' tonight at ' || fmt_time(g.kickoff_at) || '!'
+    select user_id, 'game_reminder', 'Game today ⚽',
+           'See you at ' || g.location || ' today at ' || fmt_time(g.kickoff_at) || '!'
       from registrations where game_id = g.id and status = 'confirmed';
     update games set reminder_sent = true where id = g.id;
   end if;
@@ -769,6 +868,20 @@ begin
   return jsonb_build_object('game', g.id, 'phase', ph, 'expired_holds', n_hold, 'expired_offers', n_offer);
 end $$;
 
+-- Every game that is open, or recently closed and not yet wrapped up.
+create or replace function public.tick_db() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare gid bigint; out jsonb := '[]'::jsonb;
+begin
+  for gid in select id from games
+              where now() >= opens_at - interval '1 minute'
+                and (ends_at > now() or not closed_processed)
+              order by kickoff_at loop
+    out := out || jsonb_build_array(tick_game(gid));
+  end loop;
+  return out;
+end $$;
+
 -- Work for the server to do with Stripe.
 create or replace function public.take_tasks(p_limit int default 8) returns jsonb
 language sql security definer set search_path = public as $$
@@ -785,12 +898,11 @@ language sql security definer set search_path = public as $$
 -- p_result: 'released' | 'refunded' | 'captured' | 'expired' | 'nothing'
 create or replace function public.task_done(p_task bigint, p_ok boolean, p_result text, p_amount int, p_ref text, p_error text)
 returns void language plpgsql security definer set search_path = public as $$
-declare t stripe_tasks; r registrations; g games;
+declare t stripe_tasks; r registrations;
 begin
   select * into t from stripe_tasks where id = p_task for update;
   if not found or t.status <> 'pending' then return; end if;
   select * into r from registrations where id = t.registration_id for update;
-  select * into g from games where id = r.game_id;
 
   if not p_ok then
     update stripe_tasks set attempts = attempts + 1, last_error = left(p_error, 500),
@@ -888,23 +1000,35 @@ language sql security definer set search_path = public as $$
 
 create or replace function public.public_config() returns jsonb
 language sql security definer set search_path = public as $$
-  select jsonb_build_object('vapid_public_key', (select value from app_secrets where key = 'vapid_public')) $$;
+  select jsonb_build_object('vapid_public_key', (select value from app_secrets where key = 'vapid_public'),
+                            'club', (select club_name from settings where id = 1)) $$;
 
 -- ---------------------------------------------------------------------
 -- Organizer (admin) tools
 -- ---------------------------------------------------------------------
 
-create or replace function public.admin_board(p_game bigint default null) returns jsonb
+-- Upcoming (and recent) games for the organizer's Games screen.
+create or replace function public.admin_schedule() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare a profiles := require_admin();
+begin
+  return jsonb_build_object(
+    'categories', (select jsonb_agg(to_jsonb(c) order by c.sort) from categories c),
+    'games', coalesce((select jsonb_agg(game_json(g) order by g.kickoff_at)
+                         from games g where g.ends_at > now() - interval '1 day'), '[]'::jsonb));
+end $$;
+
+create or replace function public.admin_board(p_game bigint) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare a profiles := require_admin(); g games;
 begin
-  if p_game is null then g := ensure_next_game(); else select * into g from games where id = p_game; end if;
+  select * into g from games where id = p_game;
+  if not found then raise exception 'That game doesn''t exist anymore.'; end if;
   return jsonb_build_object(
     'game', game_json(g),
-    'settings', (select to_jsonb(s) from settings s where id = 1),
     'registrations', coalesce((select jsonb_agg(jsonb_build_object(
         'id', r.id, 'status', r.status, 'name', pr.full_name, 'email', pr.email, 'phone', pr.phone,
-        'user_id', pr.id, 'blocked', pr.blocked, 'pay_state', r.pay_state, 'amount_cents', r.amount_cents,
+        'user_id', pr.id, 'blocked', pr.blocked, 'badges', badges_of(pr.id), 'pay_state', r.pay_state, 'amount_cents', r.amount_cents,
         'sort_at', r.sort_at, 'created_at', r.created_at, 'paid_at', r.paid_at, 'is_manual', r.is_manual,
         'hold_expires_at', r.hold_expires_at, 'offer_expires_at', r.offer_expires_at,
         'late_drop_refund', r.late_drop_refund) order by r.sort_at, r.id)
@@ -917,15 +1041,72 @@ begin
     'failed_tasks', (select count(*) from stripe_tasks where status = 'failed'));
 end $$;
 
-create or replace function public.admin_players() returns jsonb
+-- Add one game, or a game every week between two dates.
+create or replace function public.admin_add_games(p_category text, p_first date, p_last date, p_time time) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare a profiles := require_admin(); d date := p_first; n int := 0; before int; g games;
+begin
+  if p_last is null then p_last := p_first; end if;
+  if p_last < p_first then raise exception 'The last date is before the first date.'; end if;
+  if p_last - p_first > 400 then raise exception 'Please add at most about a year of games at a time.'; end if;
+  while d <= p_last loop
+    select count(*) into before from games;
+    g := make_game(p_category, d, p_time);
+    if (select count(*) from games) > before then n := n + 1; end if;
+    d := d + 7;
+  end loop;
+  return jsonb_build_object('ok', true, 'added', n);
+end $$;
+
+-- Delete a scheduled game nobody has signed up for (otherwise cancel it instead).
+create or replace function public.admin_delete_game(p_game bigint) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare a profiles := require_admin();
 begin
-  return coalesce((select jsonb_agg(jsonb_build_object(
-      'id', p.id, 'name', p.full_name, 'email', p.email, 'phone', p.phone, 'blocked', p.blocked,
-      'is_admin', p.is_admin, 'created_at', p.created_at,
-      'games_played', (select count(*) from registrations r where r.user_id = p.id and r.status = 'confirmed'))
-      order by lower(coalesce(p.full_name, p.email))) from profiles p), '[]'::jsonb);
+  if exists (select 1 from registrations where game_id = p_game) then
+    raise exception 'People have signed up for this game. Use "Cancel this game" instead, so they''re refunded and notified.';
+  end if;
+  delete from games where id = p_game;
+  return jsonb_build_object('ok', true);
+end $$;
+
+create or replace function public.admin_members() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare a profiles := require_admin();
+begin
+  return jsonb_build_object(
+    'categories', (select jsonb_agg(jsonb_build_object('id', c.id, 'name', c.name, 'badge', c.badge) order by c.sort)
+                     from categories c where c.active),
+    'people', coalesce((select jsonb_agg(jsonb_build_object(
+        'id', p.id, 'name', p.full_name, 'email', p.email, 'phone', p.phone, 'blocked', p.blocked,
+        'is_admin', p.is_admin, 'created_at', p.created_at,
+        'memberships', coalesce((select jsonb_object_agg(m.category_id, jsonb_build_object('status', m.status, 'requested_at', m.requested_at))
+                                   from memberships m where m.user_id = p.id), '{}'::jsonb),
+        'games_played', (select count(*) from registrations r where r.user_id = p.id and r.status = 'confirmed'))
+        order by lower(coalesce(p.full_name, p.email))) from profiles p), '[]'::jsonb));
+end $$;
+
+-- Approve / decline / remove someone's membership in a category.
+create or replace function public.admin_set_membership(p_user uuid, p_category text, p_status text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare a profiles := require_admin(); c categories; old text;
+begin
+  if p_status not in ('approved','declined','removed') then raise exception 'Unknown choice.'; end if;
+  select * into c from categories where id = p_category;
+  if not found then raise exception 'Unknown game group.'; end if;
+  select status into old from memberships where user_id = p_user and category_id = p_category;
+  insert into memberships (user_id, category_id, status, requested_at, decided_at, decided_by)
+  values (p_user, p_category, p_status, now(), now(), a.id)
+  on conflict (user_id, category_id) do update set status = p_status, decided_at = now(), decided_by = a.id;
+  if p_status = 'approved' and old is distinct from 'approved' then
+    perform notify(p_user, 'membership_approved', 'You''re approved for ' || c.name || ' ✓',
+      'Welcome to ' || (select club_name from settings where id = 1) || ' ' || c.name ||
+      '! You''ll get an email when sign-ups open for each game.');
+  elsif p_status = 'declined' and old = 'pending' then
+    perform notify(p_user, 'membership_declined', c.name || ' request',
+      'Your request to join ' || c.name || ' wasn''t approved this time. Contact the organizer if you have questions.');
+  end if;
+  return jsonb_build_object('ok', true);
 end $$;
 
 create or replace function public.admin_remove(p_reg bigint, p_refund boolean) returns jsonb
@@ -947,18 +1128,18 @@ begin
     perform enqueue_task(r.id, 'capture', 'removed without refund');
   end if;
   perform notify(r.user_id, 'removed', 'You were removed from the game',
-    'The organizer removed you from ' || fmt_day(g.kickoff_at) || '.' ||
+    'The organizer removed you from ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || '.' ||
     case when p_refund and r.pay_state in ('authorized','captured') then ' Your payment is being returned.' else '' end);
   perform promote(g.id);
   return jsonb_build_object('ok', true);
 end $$;
 
-create or replace function public.admin_add(p_user uuid) returns jsonb
+create or replace function public.admin_add(p_game bigint, p_user uuid) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare a profiles := require_admin(); g games; p profiles;
 begin
-  g := ensure_next_game();
-  select * into g from games where id = g.id for update;
+  select * into g from games where id = p_game for update;
+  if not found then raise exception 'That game doesn''t exist anymore.'; end if;
   if g.cancelled_at is not null then raise exception 'This game was cancelled.'; end if;
   select * into p from profiles where id = p_user;
   if not found then raise exception 'Player not found.'; end if;
@@ -973,7 +1154,8 @@ begin
   values (g.id, p_user, 'confirmed', 'manual', true, 0, now());
   if p_user <> a.id then
     perform notify(p_user, 'added', 'You''re in! ✓',
-      'The organizer added you to ' || fmt_day(g.kickoff_at) || ' at ' || fmt_time(g.kickoff_at) || ' (' || g.location || ').');
+      'The organizer added you to ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || ' at ' ||
+      fmt_time(g.kickoff_at) || ' (' || g.location || ').');
   end if;
   return jsonb_build_object('ok', true);
 end $$;
@@ -1002,12 +1184,12 @@ begin
   return jsonb_build_object('ok', true);
 end $$;
 
-create or replace function public.admin_cancel_game(p_reason text) returns jsonb
+create or replace function public.admin_cancel_game(p_game bigint, p_reason text) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare a profiles := require_admin(); g games; r registrations; n int := 0;
 begin
-  g := ensure_next_game();
-  select * into g from games where id = g.id for update;
+  select * into g from games where id = p_game for update;
+  if not found then raise exception 'That game doesn''t exist anymore.'; end if;
   if g.cancelled_at is not null then raise exception 'This game is already cancelled.'; end if;
   update games set cancelled_at = now(), cancel_reason = nullif(trim(p_reason), '') where id = g.id;
   for r in select * from registrations where game_id = g.id and status in ('holding','confirmed','waitlisted','offered') for update loop
@@ -1015,7 +1197,7 @@ begin
     perform close_session(r);
     perform give_money_back(r, 'game cancelled');
     perform notify(r.user_id, 'game_cancelled', 'Game cancelled',
-      'The ' || fmt_day(g.kickoff_at) || ' game is cancelled' ||
+      'The ' || cat_name(g.category_id) || ' game on ' || fmt_day(g.kickoff_at) || ' is cancelled' ||
       coalesce(' (' || nullif(trim(p_reason), '') || ')', '') || '.' ||
       case when r.pay_state in ('authorized','captured') then ' Your payment is being returned automatically.' else '' end);
     n := n + 1;
@@ -1028,13 +1210,13 @@ begin
   return jsonb_build_object('ok', true, 'players', n);
 end $$;
 
-create or replace function public.admin_update_game(p_location text, p_max_players int, p_kickoff_time time) returns jsonb
+create or replace function public.admin_update_game(p_game bigint, p_location text, p_max_players int, p_kickoff_time time) returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare a profiles := require_admin(); g games; s settings; k timestamptz;
+declare a profiles := require_admin(); g games; c categories; k timestamptz;
 begin
-  g := ensure_next_game();
-  select * into g from games where id = g.id for update;
-  select * into s from settings where id = 1;
+  select * into g from games where id = p_game for update;
+  if not found then raise exception 'That game doesn''t exist anymore.'; end if;
+  select * into c from categories where id = g.category_id;
   if p_max_players is not null and p_max_players < active_count(g.id) then
     raise exception 'There are already % players. Remove some before lowering the limit.', active_count(g.id);
   end if;
@@ -1043,29 +1225,20 @@ begin
   update games set location = coalesce(nullif(trim(p_location), ''), location),
                    max_players = coalesce(p_max_players, max_players),
                    kickoff_at = k,
-                   ends_at = k + make_interval(mins => s.duration_minutes),
-                   closes_at = k - make_interval(mins => s.close_minutes_before)
+                   ends_at = k + make_interval(mins => c.duration_minutes),
+                   closes_at = k - make_interval(mins => c.close_minutes_before)
    where id = g.id;
   perform promote(g.id);
   return jsonb_build_object('ok', true);
 end $$;
 
+-- Club-wide settings.
 create or replace function public.admin_update_settings(p jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare a profiles := require_admin();
 begin
   update settings set
-    location             = coalesce(nullif(trim(p->>'location'), ''), location),
-    price_cents          = coalesce((p->>'price_cents')::int, price_cents),
-    max_players          = coalesce((p->>'max_players')::int, max_players),
-    kickoff_dow          = coalesce((p->>'kickoff_dow')::int, kickoff_dow),
-    kickoff_time         = coalesce((p->>'kickoff_time')::time, kickoff_time),
-    duration_minutes     = coalesce((p->>'duration_minutes')::int, duration_minutes),
-    opens_dow            = coalesce((p->>'opens_dow')::int, opens_dow),
-    opens_time           = coalesce((p->>'opens_time')::time, opens_time),
-    close_minutes_before = coalesce((p->>'close_minutes_before')::int, close_minutes_before),
-    drop_deadline_dow    = coalesce((p->>'drop_deadline_dow')::int, drop_deadline_dow),
-    drop_deadline_time   = coalesce((p->>'drop_deadline_time')::time, drop_deadline_time),
+    club_name            = coalesce(nullif(trim(p->>'club_name'), ''), club_name),
     hold_minutes         = coalesce((p->>'hold_minutes')::int, hold_minutes),
     offer_minutes        = coalesce((p->>'offer_minutes')::int, offer_minutes),
     late_offer_minutes   = coalesce((p->>'late_offer_minutes')::int, late_offer_minutes),
@@ -1076,15 +1249,44 @@ begin
   return jsonb_build_object('ok', true);
 end $$;
 
-create or replace function public.admin_message(p_title text, p_body text) returns jsonb
+-- Defaults for new games in one category (existing games keep their own details).
+create or replace function public.admin_update_category(p_category text, p jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare a profiles := require_admin(); g games; n int;
+declare a profiles := require_admin();
+begin
+  update categories set
+    name                 = coalesce(nullif(trim(p->>'name'), ''), name),
+    location             = coalesce(nullif(trim(p->>'location'), ''), location),
+    price_cents          = coalesce((p->>'price_cents')::int, price_cents),
+    max_players          = coalesce((p->>'max_players')::int, max_players),
+    kickoff_time         = coalesce((p->>'kickoff_time')::time, kickoff_time),
+    duration_minutes     = coalesce((p->>'duration_minutes')::int, duration_minutes),
+    opens_dow            = coalesce((p->>'opens_dow')::int, opens_dow),
+    opens_time           = coalesce((p->>'opens_time')::time, opens_time),
+    close_minutes_before = coalesce((p->>'close_minutes_before')::int, close_minutes_before),
+    drop_deadline_dow    = coalesce((p->>'drop_deadline_dow')::int, drop_deadline_dow),
+    drop_deadline_time   = coalesce((p->>'drop_deadline_time')::time, drop_deadline_time)
+  where id = p_category;
+  if not found then raise exception 'Unknown game group.'; end if;
+  return jsonb_build_object('ok', true);
+end $$;
+
+create or replace function public.admin_settings() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare a profiles := require_admin();
+begin
+  return jsonb_build_object('settings', (select to_jsonb(s) from settings s where id = 1),
+                            'categories', (select jsonb_agg(to_jsonb(c) order by c.sort) from categories c));
+end $$;
+
+create or replace function public.admin_message(p_game bigint, p_title text, p_body text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare a profiles := require_admin(); n int;
 begin
   if coalesce(trim(p_body), '') = '' then raise exception 'Please write a message.'; end if;
-  g := ensure_next_game();
   insert into outbox (user_id, kind, title, body)
   select distinct user_id, 'admin_message', coalesce(nullif(trim(p_title), ''), 'Message from the organizer'), trim(p_body)
-    from registrations where game_id = g.id and status in ('holding','confirmed','waitlisted','offered');
+    from registrations where game_id = p_game and status in ('holding','confirmed','waitlisted','offered');
   get diagnostics n = row_count;
   return jsonb_build_object('ok', true, 'sent_to', n);
 end $$;
@@ -1113,12 +1315,13 @@ language plpgsql security definer set search_path = public as $$
 declare a profiles := require_admin();
 begin
   return coalesce((select jsonb_agg(jsonb_build_object(
-      'id', g.id, 'kickoff_at', g.kickoff_at, 'location', g.location, 'cancelled', g.cancelled_at is not null,
+      'id', g.id, 'kickoff_at', g.kickoff_at, 'category', cat_name(g.category_id), 'location', g.location,
+      'cancelled', g.cancelled_at is not null,
       'players', (select count(*) from registrations r where r.game_id = g.id and r.status = 'confirmed'),
       'collected_cents', coalesce((select sum(case when kind in ('charged','captured') then amount_cents
                                                   when kind = 'refunded' then -amount_cents else 0 end)
                                      from payment_events e where e.game_id = g.id), 0))
-      order by g.kickoff_at desc) from games g where g.kickoff_at < now() + interval '8 days'), '[]'::jsonb);
+      order by g.kickoff_at desc) from games g where g.kickoff_at < now()), '[]'::jsonb);
 end $$;
 
 create or replace function public.admin_payments() returns jsonb
@@ -1126,7 +1329,7 @@ language plpgsql security definer set search_path = public as $$
 declare a profiles := require_admin();
 begin
   return coalesce((select jsonb_agg(jsonb_build_object(
-      'date', e.created_at, 'game', g.kickoff_at, 'player', p.full_name, 'email', p.email,
+      'date', e.created_at, 'game', g.kickoff_at, 'category', cat_name(g.category_id), 'player', p.full_name, 'email', p.email,
       'kind', e.kind, 'amount_cents', e.amount_cents, 'stripe_ref', e.stripe_ref) order by e.id desc)
     from payment_events e left join games g on g.id = e.game_id left join profiles p on p.id = e.user_id), '[]'::jsonb);
 end $$;
@@ -1146,23 +1349,30 @@ begin
 end $$;
 
 -- …except what signed-in players and the organizer use from the website.
-grant execute on function public.get_home()                         to authenticated;
-grant execute on function public.my_history()                       to authenticated;
-grant execute on function public.save_profile(text, text, boolean)  to authenticated;
-grant execute on function public.drop_out()                         to authenticated;
-grant execute on function public.save_push(text, text, text)        to authenticated;
-grant execute on function public.remove_push(text)                  to authenticated;
-grant execute on function public.public_config()                    to anon, authenticated;
-grant execute on function public.admin_board(bigint)                to authenticated;
-grant execute on function public.admin_players()                    to authenticated;
-grant execute on function public.admin_remove(bigint, boolean)      to authenticated;
-grant execute on function public.admin_add(uuid)                    to authenticated;
-grant execute on function public.admin_move(bigint, text)           to authenticated;
-grant execute on function public.admin_cancel_game(text)            to authenticated;
-grant execute on function public.admin_update_game(text, int, time) to authenticated;
-grant execute on function public.admin_update_settings(jsonb)       to authenticated;
-grant execute on function public.admin_message(text, text)          to authenticated;
-grant execute on function public.admin_block(uuid, boolean)         to authenticated;
-grant execute on function public.admin_games()                      to authenticated;
-grant execute on function public.admin_set_organizer(uuid, boolean) to authenticated;
-grant execute on function public.admin_payments()                   to authenticated;
+grant execute on function public.get_home()                                   to authenticated;
+grant execute on function public.my_history()                                 to authenticated;
+grant execute on function public.save_profile(text, text, boolean, text[])    to authenticated;
+grant execute on function public.request_membership(text)                     to authenticated;
+grant execute on function public.drop_out(bigint)                             to authenticated;
+grant execute on function public.save_push(text, text, text)                  to authenticated;
+grant execute on function public.remove_push(text)                            to authenticated;
+grant execute on function public.public_config()                              to anon, authenticated;
+grant execute on function public.admin_schedule()                             to authenticated;
+grant execute on function public.admin_board(bigint)                          to authenticated;
+grant execute on function public.admin_add_games(text, date, date, time)      to authenticated;
+grant execute on function public.admin_delete_game(bigint)                    to authenticated;
+grant execute on function public.admin_members()                              to authenticated;
+grant execute on function public.admin_set_membership(uuid, text, text)       to authenticated;
+grant execute on function public.admin_remove(bigint, boolean)                to authenticated;
+grant execute on function public.admin_add(bigint, uuid)                      to authenticated;
+grant execute on function public.admin_move(bigint, text)                     to authenticated;
+grant execute on function public.admin_cancel_game(bigint, text)              to authenticated;
+grant execute on function public.admin_update_game(bigint, text, int, time)   to authenticated;
+grant execute on function public.admin_update_settings(jsonb)                 to authenticated;
+grant execute on function public.admin_update_category(text, jsonb)           to authenticated;
+grant execute on function public.admin_settings()                             to authenticated;
+grant execute on function public.admin_message(bigint, text, text)            to authenticated;
+grant execute on function public.admin_block(uuid, boolean)                   to authenticated;
+grant execute on function public.admin_set_organizer(uuid, boolean)           to authenticated;
+grant execute on function public.admin_games()                                to authenticated;
+grant execute on function public.admin_payments()                             to authenticated;

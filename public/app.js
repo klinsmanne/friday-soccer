@@ -1,11 +1,11 @@
-// Friday Soccer — the website players and the organizer use.
+// Midwest FC — the website players and organizers use.
 const TZ = 'America/Chicago';
 const WAIVER = 'I understand that playing soccer involves a risk of injury. I am choosing to play voluntarily, ' +
   'I am responsible for my own health and safety, and I agree not to hold the organizer or other players ' +
   'responsible for injuries that happen during the game, to the extent the law allows.';
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-const S = { cfg: null, session: null, home: null, email: '', refreshing: null, admin: {} };
+const S = { cfg: null, session: null, home: null, email: '', refreshing: null };
 const app = document.getElementById('app');
 
 // ---------- small helpers ----------
@@ -16,6 +16,7 @@ const timeOf = (iso) => fmt(iso, { hour: 'numeric', minute: '2-digit' });
 const dayOf = (iso) => fmt(iso, { weekday: 'short', month: 'short', day: 'numeric' });
 const longDay = (iso) => fmt(iso, { weekday: 'long', month: 'long', day: 'numeric' });
 const whenOf = (iso) => `${fmt(iso, { weekday: 'short' })} ${timeOf(iso)}`;
+const badgeHtml = (badges) => (badges || []).map((b) => `<span class="badge b-${esc(String(b).toLowerCase())}">${esc(b)}</span>`).join('');
 function store(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch {} }
 function stored(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
 
@@ -25,17 +26,20 @@ function toast(msg, ms = 3200) {
   clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), ms);
 }
 
-function modal({ title, text, buttons }) {
+function modal({ title, text, buttons, html }) {
   return new Promise((resolve) => {
     const root = document.getElementById('modal-root');
     root.innerHTML = `<div class="modal-back"><div class="modal" role="dialog" aria-modal="true">
-      <h3>${esc(title)}</h3>${text ? `<p>${text}</p>` : ''}
+      <h3>${esc(title)}</h3>${text ? `<p>${text}</p>` : ''}${html || ''}
       <div class="stack">${buttons.map((b, i) => `<button class="btn ${b.cls || ''}" data-i="${i}">${esc(b.label)}</button>`).join('')}</div>
     </div></div>`;
     root.querySelector('.modal-back').addEventListener('click', (e) => {
       const i = e.target.dataset.i;
-      if (i !== undefined) { root.innerHTML = ''; resolve(buttons[i].value); }
-      else if (e.target.classList.contains('modal-back')) { root.innerHTML = ''; resolve(null); }
+      if (i !== undefined) {
+        const form = root.querySelector('form');
+        const data = form ? Object.fromEntries(new FormData(form)) : null;
+        root.innerHTML = ''; resolve(buttons[i].value === undefined ? null : (data && buttons[i].value === true ? data : buttons[i].value));
+      } else if (e.target.classList.contains('modal-back')) { root.innerHTML = ''; resolve(null); }
     });
   });
 }
@@ -107,19 +111,21 @@ function signedOut() { setSession(null); S.home = null; route(); }
 
 // ---------- routing ----------
 window.addEventListener('hashchange', () => route());
-document.addEventListener('visibilitychange', () => { if (!document.hidden && S.session && location.hash.replace('#', '') in { '': 1, '/': 1 }) loadHome(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && S.session && ['', '#', '#/'].includes(location.hash)) loadHome(); });
 
 async function route() {
-  clearInterval(S.poll);
+  clearInterval(S.poll); clearInterval(S.refreshTimer);
   if (!S.session) return renderSignIn();
   const h = location.hash.replace(/^#/, '') || '/';
   try {
     if (!S.home) S.home = await rpc('get_home');
     const me = S.home.me;
-    if (!me.full_name || !me.waiver) return renderProfile(true);
+    const hasRequest = S.home.memberships.some((m) => m.status === 'pending' || m.status === 'approved');
+    if (!me.full_name || !me.waiver || (!me.is_admin && !hasRequest)) return renderProfile(true);
+    if (h.startsWith('/admin') && me.is_admin) { const [, , tab, id] = h.split('/'); return renderAdmin(tab || 'games', id); }
     if (h === '/profile') return renderProfile(false);
     if (h === '/history') return renderHistory();
-    if (h.startsWith('/admin') && me.is_admin) return renderAdmin(h.split('/')[2] || 'game');
+    if (!S.home.sections.length) return renderPending();
     return renderHome();
   } catch (e) {
     if (!S.session) return;
@@ -129,15 +135,15 @@ async function route() {
 }
 
 function topBar(right = '') {
-  return `<header class="top"><a class="brand" href="#/"><img src="/icons/icon-192.png" alt="">Friday Soccer</a>${right}</header>`;
+  return `<header class="top"><a class="brand" href="#/"><img src="/icons/icon-192.png" alt="">Midwest FC</a>${right}</header>`;
 }
 
 // ---------- sign in ----------
 function renderSignIn(step = 'email', error = '') {
   if (step === 'email') {
     app.innerHTML = `
-      <div class="hero"><img src="/icons/icon-192.png" alt=""><h1>Friday Soccer</h1>
-      <p class="muted">Ackerman Soccer · Fridays 10 PM</p></div>
+      <div class="hero"><img src="/icons/icon-192.png" alt=""><h1>Midwest FC</h1>
+      <p class="muted">Pickup soccer · members sign-up</p></div>
       <form class="card" id="f">
         <label for="email">Your email</label>
         <input id="email" type="email" inputmode="email" autocomplete="email" required placeholder="you@example.com" value="${esc(S.email)}">
@@ -183,11 +189,13 @@ function renderSignIn(step = 'email', error = '') {
   };
 }
 
-// ---------- profile ----------
+// ---------- profile + membership requests ----------
 function renderProfile(first) {
-  const me = S.home.me;
+  const h = S.home, me = h.me;
+  const requestable = h.memberships.filter((m) => !['pending', 'approved'].includes(m.status));
+  const statusText = { approved: 'Member', pending: 'Waiting for approval', declined: 'Not approved', removed: 'Removed' };
   app.innerHTML = `${first ? '' : topBar('<a class="iconbtn" href="#/">Done</a>')}
-    ${first ? `<div class="hero"><img src="/icons/icon-192.png" alt=""><h1>Welcome!</h1><p class="muted">Just a couple of things before you play.</p></div>` : ''}
+    ${first ? `<div class="hero"><img src="/icons/icon-192.png" alt=""><h1>Join Midwest FC</h1><p class="muted">Tell us who you are and which games you play.</p></div>` : ''}
     <form class="card" id="f">
       ${first ? '' : '<h2>Your profile</h2>'}
       <label for="n">Full name</label>
@@ -196,31 +204,58 @@ function renderProfile(first) {
       <label for="p">Phone (optional)</label>
       <input id="p" type="tel" autocomplete="tel" placeholder="(555) 123-4567" value="${esc(me.phone)}">
       <p class="muted small">Only the organizer can see it.</p>
+      ${!first ? `<label>Your groups</label>
+        ${h.memberships.map((m) => `<div class="row-item"><div class="who"><b>${esc(m.category)}</b></div>
+          ${m.status ? `<span class="tag ${m.status === 'approved' ? '' : m.status === 'pending' ? 'warn' : 'grey'}">${statusText[m.status]}</span>` : '<span class="tag grey">Not a member</span>'}</div>`).join('')}` : ''}
+      ${requestable.length && !(me.is_admin && first) ? `<label>${first ? 'Which games do you want to join?' : 'Ask to join'}</label>
+        ${requestable.map((m) => `<label class="check"><input type="checkbox" name="req" value="${esc(m.category_id)}"> ${esc(m.category)}</label>`).join('')}
+        <p class="muted small">The organizer approves every new member. You'll get an email once you're in.</p>` : ''}
       ${me.waiver ? '' : `<div class="waiver">${esc(WAIVER)}</div>
         <label class="check"><input type="checkbox" id="w" required> I have read and agree to this</label>`}
-      <button class="btn" type="submit" style="margin-top:18px">${first ? 'Let\'s play' : 'Save'}</button>
+      <button class="btn" type="submit" style="margin-top:18px">${first ? (me.is_admin ? 'Continue' : 'Send my request') : 'Save'}</button>
       <div class="err"></div>
       ${first ? '' : `<p class="center small muted">Signed in as ${esc(me.email)} · <button class="linkbtn" type="button" id="out">Sign out</button></p>`}
     </form>`;
   const f = document.getElementById('f');
   const out = document.getElementById('out');
-  if (out) out.onclick = async () => { try { await authCall('logout', {}); } catch {} signedOut(); };
+  if (out) out.onclick = signOut;
   f.onsubmit = async (e) => {
     e.preventDefault();
+    const req = [...f.querySelectorAll('input[name=req]:checked')].map((x) => x.value);
     try {
-      await rpc('save_profile', { p_full_name: f.n.value, p_phone: f.p.value, p_accept_waiver: !!(f.w && f.w.checked) });
-      S.home = null; location.hash = '#/'; if (!first) toast('Saved'); route();
+      await rpc('save_profile', { p_full_name: f.n.value, p_phone: f.p.value, p_accept_waiver: !!(f.w && f.w.checked), p_request: req.length ? req : null });
+      if (req.length) kick();
+      S.home = null; location.hash = '#/'; toast(req.length ? 'Request sent ✓' : 'Saved'); route();
     } catch (err) { f.querySelector('.err').textContent = err.message; }
   };
 }
 
+async function signOut() { try { await authCall('logout', {}); } catch {} signedOut(); }
+
+function renderPending() {
+  const h = S.home;
+  const pending = h.memberships.filter((m) => m.status === 'pending');
+  app.innerHTML = `${topBar('<a class="iconbtn" href="#/profile">Profile</a>')}
+    <div class="hero"><img src="/icons/icon-192.png" alt=""><h1>Almost there</h1></div>
+    <section class="card center">
+      ${pending.length ? `<p>Thanks, <b>${esc(h.me.full_name)}</b>! Your request to join <b>${pending.map((m) => esc(m.category)).join('</b> and <b>')}</b>
+        is waiting for the organizer's approval.</p><p class="muted">We'll email you at ${esc(h.me.email)} as soon as you're approved.
+        Then you'll see the games here and can sign up when sign-ups open.</p>`
+        : `<p>You're not a member of any game group right now.</p><p class="muted">Ask to join from your profile.</p>`}
+      <a class="btn secondary" href="#/profile" style="margin-top:8px">${pending.length ? 'View my profile' : 'Ask to join'}</a>
+    </section>
+    <p class="center small"><button class="linkbtn muted" id="out">Sign out</button></p>`;
+  document.getElementById('out').onclick = signOut;
+  S.refreshTimer = setInterval(() => { if (!document.hidden) { S.home = null; route(); } }, 60000);
+}
+
 // ---------- home ----------
 async function loadHome() {
-  try { S.home = await rpc('get_home'); if ((location.hash || '#/') === '#/' || location.hash === '') renderHome(); } catch {}
+  try { S.home = await rpc('get_home'); if (['', '#', '#/'].includes(location.hash)) renderHome(); } catch {}
 }
 
 function remaining(iso) {
-  const ms = new Date(iso) - Date.now() - (S.skew || 0);
+  const ms = new Date(iso) - Date.now() - (S.skew || 0);   // skew = server clock − phone clock
   if (ms <= 0) return '0:00';
   const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
@@ -231,92 +266,112 @@ function inQuietNow() {
   return hr >= 22 || hr < 9;
 }
 
-function actionHtml(h) {
-  const g = h.game, my = h.my, price = money(g.price_cents);
+function actionHtml(v, me) {
+  const g = v.game, my = v.my, price = money(g.price_cents), gid = g.id;
   const active = my && ['holding', 'confirmed', 'waitlisted', 'offered'].includes(my.status) ? my : null;
   const full = g.spots_taken >= g.max_players;
+  const btn = (act, label, cls = '') => `<button class="btn ${cls}" data-act="${act}" data-game="${gid}">${label}</button>`;
+  const link = (act, label) => `<div class="center"><button class="linkbtn" data-act="${act}" data-game="${gid}">${label}</button></div>`;
 
   if (g.phase === 'cancelled') return `<div class="status off">Game cancelled${g.cancel_reason ? `<small>${esc(g.cancel_reason)}</small>` : ''}</div>`;
   if (active && active.status === 'confirmed') {
     const held = active.pay_state === 'authorized';
     return `<div class="status in">You're in ✓<small>${active.is_manual ? 'Added by the organizer' :
       held ? `Card on hold for ${price} · charged ${whenOf(g.drop_deadline_at)}` : 'Paid'}</small></div>
-      <div class="center"><button class="linkbtn" data-act="drop">I can't make it — drop out</button></div>`;
+      ${link('drop', 'I can\'t make it — drop out')}`;
   }
   if (active && active.status === 'holding') {
-    return `<button class="btn" data-act="pay">Finish paying ${price}</button>
+    return `${btn('pay', `Finish paying ${price}`)}
       <div class="sub">Your spot is held for <b class="countdown" data-until="${active.hold_expires_at}">${remaining(active.hold_expires_at)}</b></div>
-      <div class="center"><button class="linkbtn" data-act="drop">Release my spot</button></div>`;
+      ${link('drop', 'Release my spot')}`;
   }
   if (active && active.status === 'offered') {
-    const paused = inQuietNow();
-    return `<button class="btn" data-act="pay">Spot available — pay ${price}</button>
-      <div class="sub">${paused ? `Pay by <b>${whenOf(active.offer_expires_at)}</b> (clock paused overnight)`
+    return `${btn('pay', `Spot available — pay ${price}`)}
+      <div class="sub">${inQuietNow() ? `Pay by <b>${whenOf(active.offer_expires_at)}</b> (clock paused overnight)`
         : `Pay within <b class="countdown" data-until="${active.offer_expires_at}">${remaining(active.offer_expires_at)}</b> or it goes to the next person`}</div>
-      <div class="center"><button class="linkbtn" data-act="drop">No thanks, give it to the next person</button></div>`;
+      ${link('drop', 'No thanks, give it to the next person')}`;
   }
   if (active && active.status === 'waitlisted') {
     return `<div class="status wait">You're #${active.position} on the waitlist<small>We'll notify you the moment a spot opens</small></div>
-      <div class="center"><button class="linkbtn" data-act="drop">Leave the waitlist</button></div>`;
+      ${link('drop', 'Leave the waitlist')}`;
   }
   if (g.phase === 'upcoming') return `<div class="status off">Sign-ups open ${whenOf(g.opens_at)}<small>${longDay(g.opens_at)}</small></div>`;
   if (g.phase !== 'open') return `<div class="status off">Sign-ups closed</div>`;
-  if (h.me.blocked) return `<div class="status off">Contact the organizer to play</div>`;
-  if (full) return `<button class="btn" data-act="pay">Join the waitlist</button>
-      <div class="sub">Free to join. If a spot opens, you'll get ${remaining_window(g)} to pay ${price}.</div>`;
-  return `<button class="btn" data-act="pay">Sign up & pay ${price}</button>
+  if (me.blocked) return `<div class="status off">Contact the organizer to play</div>`;
+  if (full) return `${btn('pay', 'Join the waitlist')}
+      <div class="sub">Free to join. If a spot opens, you'll get ${(new Date(g.kickoff_at) - Date.now()) < 6 * 3600e3 ? '30 minutes' : '2 hours'} to pay ${price}.</div>`;
+  return `${btn('pay', `Sign up & pay ${price}`)}
     <div class="sub">${new Date() < new Date(g.drop_deadline_at) ? `Your card is only charged ${whenOf(g.drop_deadline_at)}. Drop before then for free.` : 'Apple Pay, Google Pay or card.'}</div>`;
 }
-function remaining_window(g) {
-  return (new Date(g.kickoff_at) - Date.now()) < 6 * 3600e3 ? '30 minutes' : '2 hours';
-}
 
-function renderHome() {
-  const h = S.home, g = h.game;
-  S.skew = Date.now() - new Date(h.server_now).getTime();
-  const pct = Math.min(100, Math.round((g.spots_taken / g.max_players) * 100));
-  const params = new URLSearchParams(location.search);
-  let banner = '';
-  if (params.get('paid')) {
-    const mine = h.my && h.my.status === 'confirmed';
-    banner = mine ? `<div class="notice ok"><b>Payment received — you're in!</b></div>`
-      : `<div class="notice ok"><b>Payment received.</b> Confirming your spot…</div>`;
-    if (mine) history.replaceState(null, '', '/' + location.hash); else setTimeout(loadHome, 2500);
-  } else if (params.get('checkout') === 'cancelled') {
-    history.replaceState(null, '', '/' + location.hash);
-    if (h.my && h.my.status === 'holding') banner = `<div class="notice warn">You didn't finish paying. Your spot is still held for a few minutes.</div>`;
+function sectionHtml(sec, me) {
+  const v = sec.view;
+  if (!v) {
+    return `<h2 class="section-title">${esc(sec.category)} ${badgeHtml([sec.badge])}</h2>
+      <section class="card center muted">No ${esc(sec.category)} are scheduled yet. You'll get an email when sign-ups open.</section>`;
   }
-  const lateDrop = h.my && h.my.status === 'dropped' && h.my.late_drop_refund === 'pending'
+  const g = v.game;
+  const pct = Math.min(100, Math.round((g.spots_taken / g.max_players) * 100));
+  const lateDrop = v.my && v.my.status === 'dropped' && v.my.late_drop_refund === 'pending'
     ? `<div class="notice warn">You dropped after the deadline. If someone takes your spot, you'll be refunded automatically.</div>` : '';
-
-  app.innerHTML = `${topBar(h.me.is_admin ? '<a class="iconbtn" href="#/admin">Organizer</a>' : '<a class="iconbtn" href="#/profile">Profile</a>')}
-    ${banner}${lateDrop}
+  const names = (list, extra) => list.map((p) => `<li class="${p.me ? 'me' : ''}"><span class="nm">${esc(p.name)}</span>${badgeHtml(p.badges)}${extra(p)}${p.me ? ' <span class="tag">You</span>' : ''}</li>`).join('');
+  return `<h2 class="section-title">${esc(sec.category)} ${badgeHtml([sec.badge])}</h2>
+    ${lateDrop}
     <section class="card game">
-      <div class="kicker">${g.phase === 'done' || g.phase === 'closed' ? 'Tonight' : 'Next game'}</div>
+      <div class="kicker">${g.phase === 'closed' ? 'Today' : 'Next game'}</div>
       <h1>${esc(dayOf(g.kickoff_at))}</h1>
       <div class="meta">${esc(timeOf(g.kickoff_at))} – ${esc(timeOf(g.ends_at))} · ${esc(g.location)}</div>
       <div class="spots"><b>${g.spots_taken}</b><span class="of">/${g.max_players}</span><span class="label">spots taken${g.waitlist_count ? ` · ${g.waitlist_count} waiting` : ''}</span></div>
       <div class="bar"><span style="width:${pct}%"></span></div>
-      ${actionHtml(h)}
+      ${actionHtml(v, me)}
     </section>
-    ${pushCard()}
     <section class="card">
-      <h2>Playing (${h.confirmed.length})</h2>
-      ${h.confirmed.length ? `<ol class="names">${h.confirmed.map((p) => `<li class="${p.me ? 'me' : ''}">${esc(p.name)}${p.me ? ' <span class="tag">You</span>' : ''}</li>`).join('')}</ol>`
+      <h2>Playing (${v.confirmed.length})</h2>
+      ${v.confirmed.length ? `<ol class="names">${names(v.confirmed, () => '')}</ol>`
         : `<p class="muted">No one yet${g.phase === 'open' ? ' — be the first!' : '.'}</p>`}
-      ${h.paying_count ? `<p class="muted small">+ ${h.paying_count} paying right now</p>` : ''}
+      ${v.paying_count ? `<p class="muted small">+ ${v.paying_count} paying right now</p>` : ''}
     </section>
-    ${h.waitlist.length ? `<section class="card"><h2>Waitlist (${h.waitlist.length})</h2>
-      <ol class="names">${h.waitlist.map((p) => `<li class="${p.me ? 'me' : ''}">${esc(p.name)}${p.offered ? ' <span class="tag warn">Spot offered</span>' : ''}${p.me ? ' <span class="tag">You</span>' : ''}</li>`).join('')}</ol></section>` : ''}
+    ${v.waitlist.length ? `<section class="card"><h2>Waitlist (${v.waitlist.length})</h2>
+      <ol class="names">${names(v.waitlist, (p) => (p.offered ? ' <span class="tag warn">Spot offered</span>' : ''))}</ol></section>` : ''}
+    ${sec.upcoming.length ? `<section class="card"><details><summary>Upcoming ${esc(sec.category)} (${sec.upcoming.length})</summary>
+      ${sec.upcoming.map((u) => `<div class="row-item"><div class="who"><b>${esc(longDay(u.kickoff_at))}</b>
+        <span>${u.cancelled ? 'Cancelled' : `${esc(timeOf(u.kickoff_at))} · sign-ups open ${esc(whenOf(u.opens_at))}, ${esc(dayOf(u.opens_at))}`}</span></div></div>`).join('')}
+      </details></section>` : ''}`;
+}
+
+function renderHome() {
+  const h = S.home;
+  if (!h.sections.length) return renderPending();
+  S.skew = new Date(h.server_now).getTime() - Date.now();
+  const params = new URLSearchParams(location.search);
+  let banner = '';
+  const anyConfirmedNow = h.sections.some((s) => s.view && s.view.my && s.view.my.status === 'confirmed');
+  if (params.get('paid')) {
+    banner = anyConfirmedNow ? `<div class="notice ok"><b>Payment received — you're in!</b></div>`
+      : `<div class="notice ok"><b>Payment received.</b> Confirming your spot…</div>`;
+    if (anyConfirmedNow) history.replaceState(null, '', '/' + location.hash); else setTimeout(loadHome, 2500);
+  } else if (params.get('checkout') === 'cancelled') {
+    history.replaceState(null, '', '/' + location.hash);
+    banner = `<div class="notice warn">You didn't finish paying. If your spot is still held, you can finish within a few minutes.</div>`;
+  }
+  const pendingOther = h.memberships.filter((m) => m.status === 'pending');
+  const adminNote = h.me.is_admin && h.pending_requests ? `<a class="notice info row" href="#/admin/members" style="display:flex;text-decoration:none;color:inherit">
+      <span><b>${h.pending_requests} membership request${h.pending_requests > 1 ? 's' : ''}</b> waiting for you</span><span class="tag warn">Review</span></a>` : '';
+
+  app.innerHTML = `${topBar(h.me.is_admin ? `<a class="iconbtn" href="#/admin">Organizer${h.pending_requests ? ` <span class="dot">${h.pending_requests}</span>` : ''}</a>` : '<a class="iconbtn" href="#/profile">Profile</a>')}
+    ${banner}${adminNote}
+    <div class="me-line">${esc(h.me.full_name)} ${badgeHtml(h.me.badges)}</div>
+    ${pendingOther.length ? `<div class="notice info small">Waiting for approval: ${pendingOther.map((m) => esc(m.category)).join(', ')}</div>` : ''}
+    ${h.sections.map((s) => sectionHtml(s, h.me)).join('')}
+    ${pushCard()}
     <section class="card small muted">
       <b style="color:var(--ink)">How it works</b><br>
-      ${g.max_players} spots, first come first served. ${money(g.price_cents)} per game.
-      Drop before ${whenOf(g.drop_deadline_at)} for a full refund; after that you're only refunded if someone takes your spot.
-      Sign-ups close ${whenOf(g.closes_at)}.
+      First come, first served. Drop before the deadline (shown on your spot) for a full refund; after that you're only refunded if someone takes your spot.
+      If the game is full, join the waitlist for free and we'll notify you if a spot opens.
     </section>
     <nav class="foot"><a href="#/history">My games & payments</a><a href="#/profile">Profile</a>${h.me.is_admin ? '<a href="#/admin">Organizer</a>' : ''}</nav>`;
 
-  app.querySelectorAll('[data-act]').forEach((b) => { b.onclick = () => handleAction(b.dataset.act, b); });
+  app.querySelectorAll('[data-act]').forEach((b) => { b.onclick = () => handleAction(b.dataset.act, Number(b.dataset.game), b); });
   const pushBtn = document.getElementById('push-on');
   if (pushBtn) pushBtn.onclick = enablePush;
   const pushNo = document.getElementById('push-no');
@@ -335,12 +390,14 @@ function renderHome() {
   S.refreshTimer = setInterval(() => { if (!document.hidden) loadHome(); }, 30000);
 }
 
-async function handleAction(act, btn) {
-  const h = S.home, g = h.game, my = h.my;
+async function handleAction(act, gameId, btn) {
+  const sec = S.home.sections.find((s) => s.view && s.view.game.id === gameId);
+  if (!sec) return;
+  const g = sec.view.game, my = sec.view.my;
   if (act === 'pay') {
     btn.disabled = true; btn.textContent = 'One moment…';
     try {
-      const r = await api('checkout');
+      const r = await api('checkout', { game_id: gameId });
       if (r.action === 'redirect') { location.href = r.url; return; }
       if (r.action === 'waitlisted') toast(`You're #${r.position} on the waitlist`);
       await loadHome();
@@ -358,7 +415,7 @@ async function handleAction(act, btn) {
     else text = 'Sign-ups are closed, so there\'s no refund.';
     const ok = await modal({ title, text: esc(text), buttons: [{ label: yes, cls: 'danger', value: true }, { label: 'Keep my spot', cls: 'secondary', value: false }] });
     if (!ok) return;
-    try { const r = await rpc('drop_out'); kick(); toast(r.message, 6000); } catch (e) { toast(e.message); }
+    try { const r = await rpc('drop_out', { p_game: gameId }); kick(); toast(r.message, 6000); } catch (e) { toast(e.message); }
     await loadHome();
   }
 }
@@ -376,7 +433,7 @@ function pushCard() {
   }
   if (isIOS && !standalone) {
     return `<div class="notice info"><b>Tip: get notifications on iPhone</b><br>
-      <span class="small">Tap the Share button <b>⎋</b> at the bottom of Safari, then <b>Add to Home Screen</b>. Open Friday Soccer from your home screen and tap "Turn on".
+      <span class="small">Tap the Share button at the bottom of Safari, then <b>Add to Home Screen</b>. Open Midwest FC from your home screen and tap "Turn on".
       You'll get emails either way.</span>
       <div class="center"><button class="linkbtn muted" id="push-no">Got it</button></div></div>`;
   }
@@ -414,7 +471,7 @@ async function renderHistory() {
   const kind = { authorized: 'Card hold', charged: 'Charged', captured: 'Charged', released: 'Hold released', refunded: 'Refunded' };
   app.innerHTML = `${topBar('<a class="iconbtn" href="#/">Back</a>')}
     <section class="card"><h2>My games</h2>
-      ${d.games.length ? `<table class="simple"><tr><th>Game</th><th>Status</th></tr>${d.games.map((x) => `<tr><td>${esc(dayOf(x.kickoff_at))}</td>
+      ${d.games.length ? `<table class="simple"><tr><th>Game</th><th>Status</th></tr>${d.games.map((x) => `<tr><td>${esc(dayOf(x.kickoff_at))}<br><span class="muted small">${esc(x.category)}</span></td>
         <td>${x.cancelled ? '<span class="tag grey">Game cancelled</span>' : `<span class="tag ${x.status === 'confirmed' ? '' : 'grey'}">${esc(label[x.status] || x.status)}</span>`}</td></tr>`).join('')}</table>`
         : '<p class="muted">No games yet.</p>'}
     </section>
@@ -433,37 +490,76 @@ const payTag = (r) => ({
   refund_pending: '<span class="tag warn">Refunding</span>', refunded: '<span class="tag grey">Refunded</span>',
   released: '<span class="tag grey">Released</span>', none: '',
 }[r.pay_state] || '');
+const phaseText = (g) => ({ upcoming: `Opens ${whenOf(g.opens_at)}, ${dayOf(g.opens_at)}`, open: `Open until ${whenOf(g.closes_at)}`, closed: 'Sign-ups closed', done: 'Finished', cancelled: 'Cancelled' }[g.phase]);
 
-async function renderAdmin(tab) {
-  const tabs = [['game', 'This game'], ['message', 'Message'], ['players', 'Players'], ['settings', 'Settings'], ['history', 'History']];
+async function renderAdmin(tab, id) {
+  const pend = S.home.pending_requests;
+  const tabs = [['games', 'Games'], ['members', `Members${pend ? ` <span class="dot">${pend}</span>` : ''}`], ['message', 'Message'], ['settings', 'Settings'], ['history', 'History']];
   const shell = (inner) => `${topBar('<a class="iconbtn" href="#/">Player view</a>')}
-    <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/admin/${k}" class="${k === tab ? 'on' : ''}">${l}</a>`).join('')}</nav>${inner}`;
+    <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/admin/${k}" class="${k === tab || (tab === 'game' && k === 'games') ? 'on' : ''}">${l}</a>`).join('')}</nav>${inner}`;
   app.innerHTML = shell('<div class="loading"><div class="spinner"></div></div>');
   try {
-    if (tab === 'game') return await adminGame(shell);
-    if (tab === 'message') return adminMessage(shell);
-    if (tab === 'players') return await adminPlayers(shell);
+    if (tab === 'game') return await adminGame(shell, Number(id));
+    if (tab === 'games') return await adminGames(shell);
+    if (tab === 'members') return await adminMembers(shell);
+    if (tab === 'message') return await adminMessage(shell);
     if (tab === 'settings') return await adminSettings(shell);
     if (tab === 'history') return await adminHistory(shell);
+    return await adminGames(shell);
   } catch (e) { app.innerHTML = shell(`<div class="card">${esc(e.message)}</div>`); }
 }
 
-async function adminGame(shell) {
-  const b = await rpc('admin_board', { p_game: null });
+async function adminGames(shell) {
+  const d = await rpc('admin_schedule');
+  const cats = d.categories;
+  app.innerHTML = shell(`
+    <div class="btn-row" style="margin-bottom:14px"><button class="btn dark" id="add-weekly">Add weekly games</button><button class="btn secondary" id="add-one">Add one game</button></div>
+    ${cats.map((c) => {
+      const list = d.games.filter((g) => g.category_id === c.id);
+      return `<h2 class="section-title">${esc(c.name)} ${badgeHtml([c.badge])}</h2><section class="card">
+        ${list.length ? list.map((g) => `<a class="row-item linkrow" href="#/admin/game/${g.id}">
+          <div class="who"><b>${esc(dayOf(g.kickoff_at))} · ${esc(timeOf(g.kickoff_at))}</b><span>${esc(phaseText(g))}</span></div>
+          <span class="tag ${g.phase === 'open' ? '' : 'grey'}">${g.spots_taken}/${g.max_players}</span><span class="chev">›</span></a>`).join('')
+          : '<p class="muted">No games scheduled. Use "Add weekly games".</p>'}
+      </section>`;
+    }).join('')}`);
+  const catOptions = cats.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+  const addForm = (weekly) => `<form class="stack-form">
+      <label>Group</label><select name="cat">${catOptions}</select>
+      <label>${weekly ? 'First game date' : 'Game date'}</label><input name="first" type="date" required>
+      ${weekly ? '<label>Last game date</label><input name="last" type="date" required>' : ''}
+      <label>Kickoff time (blank = the group\'s usual time)</label><input name="time" type="time">
+      <p class="muted small">Sign-ups open, the drop deadline and closing time follow the group's settings.</p></form>`;
+  const add = async (weekly) => {
+    const f = await modal({ title: weekly ? 'Add weekly games' : 'Add one game', html: addForm(weekly),
+      buttons: [{ label: 'Add', cls: 'dark', value: true }, { label: 'Cancel', cls: 'secondary', value: false }] });
+    if (!f || !f.first) return;
+    try {
+      const r = await rpc('admin_add_games', { p_category: f.cat, p_first: f.first, p_last: weekly ? f.last : f.first, p_time: f.time || null });
+      toast(`${r.added} game${r.added === 1 ? '' : 's'} added`); adminGames(shell);
+    } catch (e) { toast(e.message, 5000); }
+  };
+  document.getElementById('add-weekly').onclick = () => add(true);
+  document.getElementById('add-one').onclick = () => add(false);
+}
+
+async function adminGame(shell, gameId) {
+  const b = await rpc('admin_board', { p_game: gameId });
   const g = b.game, regs = b.registrations;
   const playing = regs.filter((r) => ['confirmed', 'holding'].includes(r.status));
   const waiting = regs.filter((r) => ['waitlisted', 'offered'].includes(r.status));
   const gone = regs.filter((r) => !['confirmed', 'holding', 'waitlisted', 'offered'].includes(r.status));
   const row = (r, i, movable) => `<div class="row-item">
-      <div class="who"><b>${i + 1}. ${esc(r.name || r.email)}</b><span>${esc(r.email)}${r.phone ? ' · ' + esc(r.phone) : ''}</span></div>
+      <div class="who"><b>${i + 1}. ${esc(r.name || r.email)} ${badgeHtml(r.badges)}</b><span>${esc(r.email)}${r.phone ? ' · ' + esc(r.phone) : ''}</span></div>
       ${r.status === 'holding' ? '<span class="tag warn">Paying…</span>' : r.status === 'offered' ? '<span class="tag warn">Offered</span>' : payTag(r)}
       ${movable ? `<button class="mini" data-move="up" data-id="${r.id}" aria-label="Move up">↑</button><button class="mini" data-move="down" data-id="${r.id}" aria-label="Move down">↓</button>` : ''}
       <button class="mini bad" data-remove="${r.id}" data-name="${esc(r.name || r.email)}" data-paid="${['authorized', 'captured'].includes(r.pay_state) ? 1 : 0}">✕</button>
     </div>`;
-  const phaseText = { upcoming: `Sign-ups open ${whenOf(g.opens_at)}`, open: `Sign-ups open until ${whenOf(g.closes_at)}`, closed: 'Sign-ups closed', done: 'Finished', cancelled: 'Cancelled' }[g.phase];
   app.innerHTML = shell(`
-    <section class="card"><h2>${esc(longDay(g.kickoff_at))}</h2>
-      <p class="muted" style="margin:0">${esc(timeOf(g.kickoff_at))} · ${esc(g.location)} · ${esc(phaseText)}</p></section>
+    <p class="small"><a href="#/admin/games">‹ All games</a></p>
+    <section class="card"><h2>${esc(g.category)} ${badgeHtml([g.badge])}</h2>
+      <p style="margin:0"><b>${esc(longDay(g.kickoff_at))}</b> · ${esc(timeOf(g.kickoff_at))} · ${esc(g.location)}</p>
+      <p class="muted small" style="margin:4px 0 0">${esc(phaseText(g))} · drop deadline ${esc(whenOf(g.drop_deadline_at))}</p></section>
     ${b.failed_tasks ? `<div class="notice warn">${b.failed_tasks} payment action(s) failed. Check your Stripe dashboard.</div>` : ''}
     <div class="stats">
       <div class="stat"><b>${g.spots_taken}/${g.max_players}</b><span>Spots taken</span></div>
@@ -471,16 +567,16 @@ async function adminGame(shell) {
       <div class="stat"><b>${money(b.collected_cents)}</b><span>Collected</span></div>
       <div class="stat"><b>${money(b.on_hold_cents)}</b><span>On hold (charged ${esc(whenOf(g.drop_deadline_at))})</span></div>
     </div>
-    <div class="btn-row" style="margin-bottom:14px">
+    ${g.phase !== 'cancelled' ? `<div class="btn-row" style="margin-bottom:14px">
       <button class="btn dark" id="add-me">Add myself</button>
       <button class="btn secondary" id="add-player">Add a player</button>
-    </div>
+    </div>` : ''}
     <section class="card"><h2>Playing (${playing.length})</h2>${playing.map((r, i) => row(r, i, true)).join('') || '<p class="muted">No one yet.</p>'}</section>
     <section class="card"><h2>Waitlist (${waiting.length})</h2>${waiting.map((r, i) => row(r, i, true)).join('') || '<p class="muted">Empty.</p>'}</section>
     ${gone.length ? `<section class="card"><details><summary>Dropped / removed (${gone.length})</summary>
       ${gone.map((r) => `<div class="row-item"><div class="who"><b>${esc(r.name || r.email)}</b><span>${esc(r.status)}${r.late_drop_refund ? ` · late drop, refund ${esc(r.late_drop_refund)}` : ''}</span></div>${payTag(r)}</div>`).join('')}
     </details></section>` : ''}
-    <section class="card"><h2>Change this game</h2>
+    ${g.phase !== 'cancelled' ? `<section class="card"><h2>Change this game</h2>
       <form id="eg">
         <label>Location</label><input name="loc" type="text" value="${esc(g.location)}">
         <div class="grid2">
@@ -490,10 +586,11 @@ async function adminGame(shell) {
         <button class="btn secondary" style="margin-top:14px">Save changes</button>
       </form>
     </section>
-    ${g.phase !== 'cancelled' ? '<button class="btn danger" id="cancel-game">Cancel this game & refund everyone</button>' : ''}`);
+    ${regs.length ? '<button class="btn danger" id="cancel-game">Cancel this game & refund everyone</button>'
+      : '<button class="btn danger" id="delete-game">Remove this game from the schedule</button>'}` : ''}`);
 
   app.querySelectorAll('[data-move]').forEach((el) => {
-    el.onclick = async () => { try { await rpc('admin_move', { p_reg: Number(el.dataset.id), p_direction: el.dataset.move }); adminGame(shell); } catch (e) { toast(e.message); } };
+    el.onclick = async () => { try { await rpc('admin_move', { p_reg: Number(el.dataset.id), p_direction: el.dataset.move }); adminGame(shell, gameId); } catch (e) { toast(e.message); } };
   });
   app.querySelectorAll('[data-remove]').forEach((el) => {
     el.onclick = async () => {
@@ -504,26 +601,29 @@ async function adminGame(shell) {
           : [{ label: 'Remove', cls: 'danger', value: 'refund' }, { label: 'Cancel', cls: 'secondary', value: null }],
       });
       if (!choice) return;
-      try { await rpc('admin_remove', { p_reg: Number(el.dataset.remove), p_refund: choice === 'refund' }); kick(); toast('Removed'); adminGame(shell); } catch (e) { toast(e.message); }
+      try { await rpc('admin_remove', { p_reg: Number(el.dataset.remove), p_refund: choice === 'refund' }); kick(); toast('Removed'); adminGame(shell, gameId); } catch (e) { toast(e.message); }
     };
   });
-  document.getElementById('add-me').onclick = async () => {
-    try { await rpc('admin_add', { p_user: S.home.me.id }); toast('You\'re on the list'); S.home = null; adminGame(shell); } catch (e) { toast(e.message, 5000); }
+  const addMe = document.getElementById('add-me');
+  if (addMe) addMe.onclick = async () => {
+    try { await rpc('admin_add', { p_game: gameId, p_user: S.home.me.id }); toast('You\'re on the list'); S.home = null; adminGame(shell, gameId); } catch (e) { toast(e.message, 5000); }
   };
-  document.getElementById('add-player').onclick = async () => {
-    const players = await rpc('admin_players');
+  const addPlayer = document.getElementById('add-player');
+  if (addPlayer) addPlayer.onclick = async () => {
+    const m = await rpc('admin_members');
     const onList = new Set(regs.filter((r) => ['confirmed', 'holding', 'waitlisted', 'offered'].includes(r.status)).map((r) => r.user_id));
-    const options = players.filter((p) => !onList.has(p.id) && p.name);
-    if (!options.length) return toast('Everyone who has an account is already on the list');
-    const pick = await modal({ title: 'Add a player', text: 'They\'re added for free (no card charge). Players need an account first.',
-      buttons: [...options.slice(0, 30).map((p) => ({ label: p.name, cls: 'secondary', value: p.id })), { label: 'Cancel', cls: 'secondary', value: null }] });
+    const options = m.people.filter((p) => !onList.has(p.id) && p.name && (p.is_admin || (p.memberships[g.category_id] || {}).status === 'approved'));
+    if (!options.length) return toast(`Every approved ${g.category} member is already on the list`);
+    const pick = await modal({ title: 'Add a player', text: `Approved ${esc(g.category)} members. They're added for free (no card charge).`,
+      buttons: [...options.slice(0, 40).map((p) => ({ label: p.name, cls: 'secondary', value: p.id })), { label: 'Cancel', cls: 'secondary', value: null }] });
     if (!pick) return;
-    try { await rpc('admin_add', { p_user: pick }); kick(); toast('Added'); adminGame(shell); } catch (e) { toast(e.message, 5000); }
+    try { await rpc('admin_add', { p_game: gameId, p_user: pick }); kick(); toast('Added'); adminGame(shell, gameId); } catch (e) { toast(e.message, 5000); }
   };
-  document.getElementById('eg').onsubmit = async (e) => {
+  const eg = document.getElementById('eg');
+  if (eg) eg.onsubmit = async (e) => {
     e.preventDefault();
     const f = e.target;
-    try { await rpc('admin_update_game', { p_location: f.loc.value, p_max_players: Number(f.max.value), p_kickoff_time: f.ko.value || null }); kick(); toast('Game updated'); S.home = null; adminGame(shell); }
+    try { await rpc('admin_update_game', { p_game: gameId, p_location: f.loc.value, p_max_players: Number(f.max.value), p_kickoff_time: f.ko.value || null }); kick(); toast('Game updated'); S.home = null; adminGame(shell, gameId); }
     catch (err) { toast(err.message, 5000); }
   };
   const cg = document.getElementById('cancel-game');
@@ -531,104 +631,167 @@ async function adminGame(shell) {
     const reason = await modal({ title: 'Cancel this game?', text: 'Everyone is refunded automatically and gets a notification. This can\'t be undone.',
       buttons: [{ label: 'Cancel game (bad weather)', cls: 'danger', value: 'bad weather' }, { label: 'Cancel game (other reason)', cls: 'danger', value: ' ' }, { label: 'Keep the game', cls: 'secondary', value: null }] });
     if (!reason) return;
-    try { const r = await rpc('admin_cancel_game', { p_reason: reason.trim() }); kick(); toast(`Cancelled. ${r.players} player(s) notified.`); S.home = null; adminGame(shell); } catch (e) { toast(e.message); }
+    try { const r = await rpc('admin_cancel_game', { p_game: gameId, p_reason: reason.trim() }); kick(); toast(`Cancelled. ${r.players} player(s) notified.`); S.home = null; adminGame(shell, gameId); } catch (e) { toast(e.message); }
+  };
+  const dg = document.getElementById('delete-game');
+  if (dg) dg.onclick = async () => {
+    const ok = await modal({ title: 'Remove this game?', text: 'It disappears from the schedule. Nobody has signed up yet.',
+      buttons: [{ label: 'Remove game', cls: 'danger', value: true }, { label: 'Keep it', cls: 'secondary', value: false }] });
+    if (!ok) return;
+    try { await rpc('admin_delete_game', { p_game: gameId }); toast('Game removed'); location.hash = '#/admin/games'; } catch (e) { toast(e.message, 6000); }
   };
 }
 
-function adminMessage(shell) {
-  app.innerHTML = shell(`<form class="card" id="m"><h2>Message everyone</h2>
-    <p class="muted small">Goes to everyone signed up for this week (playing and waitlist), by email and notification.</p>
+async function adminMembers(shell) {
+  const d = await rpc('admin_members');
+  const cats = d.categories;
+  const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
+  const catBadge = Object.fromEntries(cats.map((c) => [c.id, c.badge]));
+  const requests = [];
+  d.people.forEach((p) => Object.entries(p.memberships).forEach(([cid, m]) => { if (m.status === 'pending' && catName[cid]) requests.push({ p, cid, at: m.requested_at }); }));
+  requests.sort((a, b) => new Date(a.at) - new Date(b.at));
+  const approvedBadges = (p) => badgeHtml(cats.filter((c) => (p.memberships[c.id] || {}).status === 'approved').map((c) => c.badge));
+  app.innerHTML = shell(`
+    <section class="card"><h2>Requests (${requests.length})</h2>
+      ${requests.length ? requests.map((r) => `<div class="row-item">
+        <div class="who"><b>${esc(r.p.name || '(no name yet)')}</b><span>${esc(r.p.email)}${r.p.phone ? ' · ' + esc(r.p.phone) : ''}</span>
+          <span>Wants to join <b>${esc(catName[r.cid])}</b> · ${esc(dayOf(r.at))}</span></div>
+        <button class="mini ok" data-mem="${r.p.id}" data-cat="${r.cid}" data-st="approved">Approve</button>
+        <button class="mini bad" data-mem="${r.p.id}" data-cat="${r.cid}" data-st="declined">Decline</button></div>`).join('')
+        : '<p class="muted">No requests waiting.</p>'}
+    </section>
+    <section class="card"><h2>Everyone (${d.people.length})</h2>
+      <div class="filters">${['all', ...cats.map((c) => c.id)].map((f) => `<button class="chip ${f === 'all' ? 'on' : ''}" data-filter="${f}">${f === 'all' ? 'All' : esc(catName[f])}</button>`).join('')}</div>
+      <input type="text" id="q" placeholder="Search name or email" style="margin:8px 0">
+      <div id="pl">${d.people.map((p) => `<div class="person" data-q="${esc(((p.name || '') + ' ' + p.email).toLowerCase())}"
+          data-cats="${cats.filter((c) => (p.memberships[c.id] || {}).status === 'approved').map((c) => c.id).join(' ')}">
+        <div class="row-item"><div class="who"><b>${esc(p.name || '(no name yet)')} ${approvedBadges(p)}${p.is_admin ? ' <span class="tag">Organizer</span>' : ''}${p.blocked ? ' <span class="tag bad">Blocked</span>' : ''}</b>
+          <span>${esc(p.email)}${p.phone ? ' · ' + esc(p.phone) : ''} · ${p.games_played} game(s)</span></div>
+          <button class="mini" data-more="${p.id}">Manage</button></div>
+      </div>`).join('')}</div>
+    </section>`);
+
+  app.querySelectorAll('[data-mem]').forEach((el) => {
+    el.onclick = async () => {
+      try { await rpc('admin_set_membership', { p_user: el.dataset.mem, p_category: el.dataset.cat, p_status: el.dataset.st }); kick();
+        toast(el.dataset.st === 'approved' ? 'Approved ✓ — they\'ve been emailed' : 'Declined'); S.home = await rpc('get_home'); adminMembers(shell); } catch (e) { toast(e.message); }
+    };
+  });
+  const filterAndSearch = () => {
+    const q = document.getElementById('q').value.toLowerCase();
+    const f = app.querySelector('.chip.on').dataset.filter;
+    app.querySelectorAll('#pl .person').forEach((el) => {
+      el.style.display = el.dataset.q.includes(q) && (f === 'all' || el.dataset.cats.split(' ').includes(f)) ? '' : 'none';
+    });
+  };
+  document.getElementById('q').oninput = filterAndSearch;
+  app.querySelectorAll('.chip').forEach((c) => { c.onclick = () => { app.querySelectorAll('.chip').forEach((x) => x.classList.remove('on')); c.classList.add('on'); filterAndSearch(); }; });
+  app.querySelectorAll('[data-more]').forEach((el) => {
+    el.onclick = async () => {
+      const p = d.people.find((x) => x.id === el.dataset.more);
+      const isMe = p.id === S.home.me.id;
+      const buttons = [];
+      cats.forEach((c) => {
+        const st = (p.memberships[c.id] || {}).status;
+        if (st === 'approved') buttons.push({ label: `Remove from ${c.name}`, cls: 'secondary', value: ['removed', c.id] });
+        else buttons.push({ label: `Approve for ${c.name}`, cls: 'dark', value: ['approved', c.id] });
+      });
+      if (!isMe) buttons.push({ label: p.is_admin ? 'Remove as organizer' : 'Make organizer', cls: 'secondary', value: ['org', !p.is_admin] });
+      if (!isMe && !p.is_admin) buttons.push({ label: p.blocked ? 'Unblock' : 'Block', cls: p.blocked ? 'secondary' : 'danger', value: ['block', !p.blocked] });
+      buttons.push({ label: 'Close', cls: 'secondary', value: null });
+      const statusLine = cats.map((c) => `${esc(c.name)}: <b>${esc((p.memberships[c.id] || {}).status || 'not a member')}</b>`).join('<br>');
+      const choice = await modal({ title: p.name || p.email, text: `${esc(p.email)}<br>${statusLine}`, buttons });
+      if (!choice) return;
+      try {
+        if (choice[0] === 'org') await rpc('admin_set_organizer', { p_user: p.id, p_on: choice[1] });
+        else if (choice[0] === 'block') await rpc('admin_block', { p_user: p.id, p_blocked: choice[1] });
+        else await rpc('admin_set_membership', { p_user: p.id, p_category: choice[1], p_status: choice[0] });
+        kick(); toast('Updated'); S.home = await rpc('get_home'); adminMembers(shell);
+      } catch (e) { toast(e.message, 5000); }
+    };
+  });
+}
+
+async function adminMessage(shell) {
+  const d = await rpc('admin_schedule');
+  const games = d.games.filter((g) => g.phase !== 'done');
+  app.innerHTML = shell(`<form class="card" id="m"><h2>Message players</h2>
+    <p class="muted small">Goes to everyone signed up for the chosen game (playing and waitlist), by email and notification.</p>
+    <label>Game</label><select name="g">${games.map((g) => `<option value="${g.id}">${esc(g.category)} · ${esc(dayOf(g.kickoff_at))} (${g.spots_taken + g.waitlist_count} signed up)</option>`).join('')}</select>
     <label>Title</label><input name="t" type="text" placeholder="e.g. Bring a dark shirt">
     <label>Message</label><textarea name="b" required placeholder="Write your message"></textarea>
     <button class="btn" style="margin-top:14px">Send</button></form>`);
   document.getElementById('m').onsubmit = async (e) => {
     e.preventDefault();
-    try { const r = await rpc('admin_message', { p_title: e.target.t.value, p_body: e.target.b.value }); kick(); toast(`Sent to ${r.sent_to} player(s)`); e.target.reset(); } catch (err) { toast(err.message); }
+    try { const r = await rpc('admin_message', { p_game: Number(e.target.g.value), p_title: e.target.t.value, p_body: e.target.b.value }); kick(); toast(`Sent to ${r.sent_to} player(s)`); e.target.reset(); } catch (err) { toast(err.message); }
   };
-}
-
-async function adminPlayers(shell) {
-  const players = await rpc('admin_players');
-  app.innerHTML = shell(`<section class="card"><h2>Players (${players.length})</h2>
-    <input type="text" id="q" placeholder="Search name or email" style="margin-bottom:8px">
-    <div id="pl">${players.map((p) => `<div class="row-item" data-q="${esc(((p.name || '') + ' ' + p.email).toLowerCase())}">
-      <div class="who"><b>${esc(p.name || '(no name yet)')}</b><span>${esc(p.email)}${p.phone ? ' · ' + esc(p.phone) : ''} · ${p.games_played} game(s)</span></div>
-      ${p.is_admin
-        ? `<span class="tag">Organizer</span>${p.id === S.home.me.id ? '' : `<button class="mini" data-org="${p.id}" data-on="0" data-name="${esc(p.name || p.email)}">Remove</button>`}`
-        : `<button class="mini" data-org="${p.id}" data-on="1" data-name="${esc(p.name || p.email)}">Make organizer</button>
-           <button class="mini ${p.blocked ? '' : 'bad'}" data-block="${p.id}" data-on="${p.blocked ? 0 : 1}">${p.blocked ? 'Unblock' : 'Block'}</button>`}
-    </div>`).join('')}</div>
-    <p class="muted small">Organizers see this dashboard and can manage games. Blocked people can still sign in but can't sign up for games. To take someone off this week's list, use "This game".</p></section>`);
-  app.querySelectorAll('[data-org]').forEach((el) => {
-    el.onclick = async () => {
-      const on = el.dataset.on === '1';
-      const ok = await modal({ title: on ? `Make ${el.dataset.name} an organizer?` : `Remove ${el.dataset.name} as organizer?`,
-        text: on ? 'They\'ll be able to remove players, refund, cancel games and change settings.' : 'They\'ll go back to the normal player view.',
-        buttons: [{ label: on ? 'Make organizer' : 'Remove organizer', cls: on ? 'dark' : 'danger', value: true }, { label: 'Cancel', cls: 'secondary', value: false }] });
-      if (!ok) return;
-      try { await rpc('admin_set_organizer', { p_user: el.dataset.org, p_on: on }); toast('Updated'); adminPlayers(shell); } catch (e) { toast(e.message); }
-    };
-  });
-  document.getElementById('q').oninput = (e) => {
-    const q = e.target.value.toLowerCase();
-    app.querySelectorAll('#pl .row-item').forEach((el) => { el.style.display = el.dataset.q.includes(q) ? '' : 'none'; });
-  };
-  app.querySelectorAll('[data-block]').forEach((el) => {
-    el.onclick = async () => { try { await rpc('admin_block', { p_user: el.dataset.block, p_blocked: el.dataset.on === '1' }); adminPlayers(shell); } catch (e) { toast(e.message); } };
-  });
 }
 
 async function adminSettings(shell) {
-  const s = (await rpc('admin_board', { p_game: null })).settings;
+  const d = await rpc('admin_settings');
+  const s = d.settings;
   const t = (v) => String(v).slice(0, 5);
-  const daySel = (name, v) => `<select name="${name}">${DAYS.map((d, i) => `<option value="${i}" ${i === v ? 'selected' : ''}>${d}</option>`).join('')}</select>`;
-  app.innerHTML = shell(`<form class="card" id="s"><h2>Settings</h2>
-    <p class="muted small">These apply from the next game that's created. To change this week's game, use "This game".</p>
-    <div class="grid2">
-      <div><label>Price ($)</label><input name="price" type="number" step="0.01" min="0.50" value="${(s.price_cents / 100).toFixed(2)}"></div>
-      <div><label>Max players</label><input name="max_players" type="number" min="2" max="100" value="${s.max_players}"></div>
-    </div>
-    <label>Location</label><input name="location" type="text" value="${esc(s.location)}">
-    <div class="grid2">
-      <div><label>Game day</label>${daySel('kickoff_dow', s.kickoff_dow)}</div>
-      <div><label>Kickoff</label><input name="kickoff_time" type="time" value="${t(s.kickoff_time)}"></div>
-      <div><label>Length (minutes)</label><input name="duration_minutes" type="number" value="${s.duration_minutes}"></div>
-      <div><label>Close sign-ups (min before)</label><input name="close_minutes_before" type="number" value="${s.close_minutes_before}"></div>
-      <div><label>Sign-ups open day</label>${daySel('opens_dow', s.opens_dow)}</div>
-      <div><label>Open time</label><input name="opens_time" type="time" value="${t(s.opens_time)}"></div>
-      <div><label>Drop deadline day</label>${daySel('drop_deadline_dow', s.drop_deadline_dow)}</div>
-      <div><label>Deadline time</label><input name="drop_deadline_time" type="time" value="${t(s.drop_deadline_time)}"></div>
-      <div><label>Checkout hold (min)</label><input name="hold_minutes" type="number" value="${s.hold_minutes}"></div>
-      <div><label>Waitlist offer (min)</label><input name="offer_minutes" type="number" value="${s.offer_minutes}"></div>
-      <div><label>Offer on game day (min)</label><input name="late_offer_minutes" type="number" value="${s.late_offer_minutes}"></div>
-      <div></div>
-      <div><label>Pause offers from</label><input name="quiet_start" type="time" value="${t(s.quiet_start)}"></div>
-      <div><label>Pause offers until</label><input name="quiet_end" type="time" value="${t(s.quiet_end)}"></div>
-    </div>
-    <button class="btn" style="margin-top:16px">Save settings</button></form>`);
-  document.getElementById('s').onsubmit = async (e) => {
+  const daySel = (name, v) => `<select name="${name}">${DAYS.map((x, i) => `<option value="${i}" ${i === v ? 'selected' : ''}>${x}</option>`).join('')}</select>`;
+  app.innerHTML = shell(`
+    ${d.categories.map((c) => `<form class="card cat-form" data-cat="${esc(c.id)}"><h2>${esc(c.name)} ${badgeHtml([c.badge])}</h2>
+      <p class="muted small">Used for new games you add. Games already on the schedule keep their own details (change those under Games).</p>
+      <label>Name</label><input name="name" type="text" value="${esc(c.name)}">
+      <div class="grid2">
+        <div><label>Price ($)</label><input name="price" type="number" step="0.01" min="0.50" value="${(c.price_cents / 100).toFixed(2)}"></div>
+        <div><label>Max players</label><input name="max_players" type="number" min="2" max="100" value="${c.max_players}"></div>
+      </div>
+      <label>Location</label><input name="location" type="text" value="${esc(c.location)}">
+      <div class="grid2">
+        <div><label>Kickoff</label><input name="kickoff_time" type="time" value="${t(c.kickoff_time)}"></div>
+        <div><label>Length (minutes)</label><input name="duration_minutes" type="number" value="${c.duration_minutes}"></div>
+        <div><label>Sign-ups open day</label>${daySel('opens_dow', c.opens_dow)}</div>
+        <div><label>Open time</label><input name="opens_time" type="time" value="${t(c.opens_time)}"></div>
+        <div><label>Drop deadline day</label>${daySel('drop_deadline_dow', c.drop_deadline_dow)}</div>
+        <div><label>Deadline time</label><input name="drop_deadline_time" type="time" value="${t(c.drop_deadline_time)}"></div>
+        <div><label>Close sign-ups (min before)</label><input name="close_minutes_before" type="number" value="${c.close_minutes_before}"></div>
+      </div>
+      <button class="btn secondary" style="margin-top:16px">Save ${esc(c.name)}</button></form>`).join('')}
+    <form class="card" id="club"><h2>Club-wide</h2>
+      <label>Club name</label><input name="club_name" type="text" value="${esc(s.club_name)}">
+      <div class="grid2">
+        <div><label>Checkout hold (min)</label><input name="hold_minutes" type="number" value="${s.hold_minutes}"></div>
+        <div><label>Waitlist offer (min)</label><input name="offer_minutes" type="number" value="${s.offer_minutes}"></div>
+        <div><label>Offer on game day (min)</label><input name="late_offer_minutes" type="number" value="${s.late_offer_minutes}"></div>
+        <div></div>
+        <div><label>Pause offers from</label><input name="quiet_start" type="time" value="${t(s.quiet_start)}"></div>
+        <div><label>Pause offers until</label><input name="quiet_end" type="time" value="${t(s.quiet_end)}"></div>
+      </div>
+      <button class="btn secondary" style="margin-top:16px">Save club settings</button></form>`);
+  app.querySelectorAll('.cat-form').forEach((form) => {
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(form));
+      const p = { ...f, price_cents: Math.round(Number(f.price) * 100) };
+      delete p.price;
+      try { await rpc('admin_update_category', { p_category: form.dataset.cat, p }); toast('Saved'); } catch (err) { toast(err.message, 5000); }
+    };
+  });
+  document.getElementById('club').onsubmit = async (e) => {
     e.preventDefault();
-    const f = Object.fromEntries(new FormData(e.target));
-    const p = { ...f, price_cents: Math.round(Number(f.price) * 100) };
-    delete p.price;
-    try { await rpc('admin_update_settings', { p }); toast('Settings saved'); } catch (err) { toast(err.message, 5000); }
+    try { await rpc('admin_update_settings', { p: Object.fromEntries(new FormData(e.target)) }); toast('Saved'); } catch (err) { toast(err.message, 5000); }
   };
 }
 
 async function adminHistory(shell) {
   const [games, pays] = await Promise.all([rpc('admin_games'), rpc('admin_payments')]);
   app.innerHTML = shell(`<section class="card"><h2>Past games</h2>
-    <table class="simple"><tr><th>Game</th><th>Players</th><th>Collected</th></tr>
-    ${games.map((g) => `<tr><td>${esc(dayOf(g.kickoff_at))}${g.cancelled ? ' <span class="tag grey">Cancelled</span>' : ''}</td><td>${g.players}</td><td>${money(g.collected_cents)}</td></tr>`).join('')}</table></section>
+    ${games.length ? `<table class="simple"><tr><th>Game</th><th>Players</th><th>Collected</th></tr>
+    ${games.map((g) => `<tr><td>${esc(dayOf(g.kickoff_at))}<br><span class="muted small">${esc(g.category)}</span>${g.cancelled ? ' <span class="tag grey">Cancelled</span>' : ''}</td><td>${g.players}</td><td>${money(g.collected_cents)}</td></tr>`).join('')}</table>`
+      : '<p class="muted">No past games yet.</p>'}</section>
     <section class="card"><h2>Payments</h2><p class="muted small">${pays.length} payment record(s).</p>
     <button class="btn secondary" id="csv">Download spreadsheet (CSV)</button></section>`);
   document.getElementById('csv').onclick = () => {
-    const rows = [['Date', 'Game', 'Player', 'Email', 'Type', 'Amount', 'Stripe reference']];
-    for (const p of pays) rows.push([fmt(p.date, { dateStyle: 'short', timeStyle: 'short' }), p.game ? dayOf(p.game) : '', p.player || '', p.email || '', p.kind, (p.amount_cents / 100).toFixed(2), p.stripe_ref || '']);
+    const rows = [['Date', 'Group', 'Game', 'Player', 'Email', 'Type', 'Amount', 'Stripe reference']];
+    for (const p of pays) rows.push([fmt(p.date, { dateStyle: 'short', timeStyle: 'short' }), p.category || '', p.game ? dayOf(p.game) : '', p.player || '', p.email || '', p.kind, (p.amount_cents / 100).toFixed(2), p.stripe_ref || '']);
     const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\r\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-    a.download = 'friday-soccer-payments.csv';
+    a.download = 'midwest-fc-payments.csv';
     a.click();
   };
 }

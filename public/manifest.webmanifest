@@ -1,7 +1,7 @@
 {
-  "name": "Friday Soccer",
-  "short_name": "Soccer",
-  "description": "Sign up and pay for Friday night soccer.",
+  "name": "Midwest FC",
+  "short_name": "Midwest FC",
+  "description": "Members sign-up for Midwest FC pickup soccer.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

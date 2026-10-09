@@ -14,7 +14,7 @@ function wrap76(s) {
 }
 
 export function buildMessage({ from, fromName, to, subject, text, date = new Date() }) {
-  const id = `${crypto.randomUUID()}@friday-soccer`;
+  const id = `${crypto.randomUUID()}@midwestfc`;
   return [
     `From: =?UTF-8?B?${b64utf8(fromName)}?= <${from}>`,
     `To: <${to}>`,
@@ -72,7 +72,7 @@ export async function sendEmails(env, connectFn, messages) {
   };
   try {
     await expect([220], 'greeting');
-    await send('EHLO friday-soccer'); await expect([250], 'EHLO');
+    await send('EHLO midwestfc'); await expect([250], 'EHLO');
     await send('AUTH LOGIN'); await expect([334], 'AUTH');
     await send(b64utf8(user)); await expect([334], 'AUTH user');
     await send(b64utf8(pass)); await expect([235], 'Gmail login (check the app password)');
@@ -87,7 +87,7 @@ export async function sendEmails(env, connectFn, messages) {
         continue;
       }
       await send('DATA'); await expect([354], 'DATA');
-      await writer.write(enc.encode(buildMessage({ from: user, fromName: 'Friday Soccer', ...m }) + '\r\n.\r\n'));
+      await writer.write(enc.encode(buildMessage({ from: user, fromName: 'Midwest FC', ...m }) + '\r\n.\r\n'));
       await expect([250], 'send');
       results[i] = { ok: true };
     }

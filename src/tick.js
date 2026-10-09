@@ -42,7 +42,7 @@ export async function ensureSetup(env) {
     if (!saved || saved.url !== url) {
       const ep = await stripe(env, 'POST', '/webhook_endpoints', {
         url,
-        description: 'Friday Soccer sign-ups',
+        description: 'Midwest FC sign-ups',
         enabled_events: ['checkout.session.completed', 'checkout.session.expired'],
       });
       await rpc(env, 'set_secret', { p_key: key, p_value: JSON.stringify({ id: ep.id, secret: ep.secret, url }) });
@@ -117,7 +117,7 @@ export async function processOutbox(env, connectFn, { limit = 20, maxPushes = 12
   const emails = await sendEmails(env, connectFn, items.map((it) => ({
     to: it.email,
     subject: it.title,
-    text: `Hi ${it.name || 'there'},\n\n${it.body}\n\nOpen the app: ${site || ''}\n\n— Friday Soccer`,
+    text: `Hi ${it.name || 'there'},\n\n${it.body}\n\nOpen the app: ${site || ''}\n\n— Midwest FC`,
   })));
 
   // Push (best effort)

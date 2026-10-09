@@ -12,6 +12,7 @@ const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/cs
 let fakeNow = process.env.FAKE_NOW || '';
 
 const lit = (v) => v === null || v === undefined ? 'null'
+  : Array.isArray(v) ? `array[${v.map((x) => `$q$${x}$q$`).join(',')}]::text[]`
   : typeof v === 'number' || typeof v === 'boolean' ? String(v)
   : typeof v === 'object' ? `$j$${JSON.stringify(v)}$j$::jsonb` : `$q$${v}$q$`;
 
@@ -52,7 +53,8 @@ http.createServer(async (req, res) => {
     }
     if (p === '/api/checkout') {
       const uid = userFrom(req);
-      const claim = JSON.parse(await sql(`select to_json(claim_spot(${lit(uid)}))`));
+      const { game_id } = await body(req);
+      const claim = JSON.parse(await sql(`select to_json(claim_spot(${lit(uid)}, ${Number(game_id)}))`));
       if (claim.error) return send(res, 400, { error: claim.error });
       if (claim.action !== 'pay') return send(res, 200, claim);
       // Pretend the player paid on Stripe.

@@ -118,7 +118,7 @@ function fakeSmtp(script) {
   const ctx = { waitUntil() {} };
   let r = await worker.fetch(new Request('https://soccer.example/api/checkout', { method: 'POST' }), env, ctx);
   assert.equal(r.status, 401); ok('checkout requires sign-in');
-  r = await worker.fetch(new Request('https://soccer.example/api/checkout', { method: 'POST', headers: { Authorization: 'Bearer good' } }), env, ctx);
+  r = await worker.fetch(new Request('https://soccer.example/api/checkout', { method: 'POST', headers: { Authorization: 'Bearer good' }, body: JSON.stringify({ game_id: 7 }) }), env, ctx);
   const out = await r.json();
   assert.equal(out.url, 'https://checkout.stripe.com/c/pay/cs_test_1'); ok('checkout returns the Stripe payment page');
   const sc = calls.find((c) => c.url.endsWith('/v1/checkout/sessions'));
@@ -132,7 +132,7 @@ function fakeSmtp(script) {
   const rpcCall = calls.find((c) => c.url.endsWith('/rpc/claim_spot'));
   assert.equal(rpcCall.init.headers.apikey, 'sb_secret_x');
   assert.equal(rpcCall.init.headers.Authorization, undefined); ok('server key sent the way new Supabase keys require');
-  assert.deepEqual(JSON.parse(rpcCall.init.body), { p_user: 'u1' }); ok('spot claimed for the signed-in player only');
+  assert.deepEqual(JSON.parse(rpcCall.init.body), { p_user: 'u1', p_game: 7 }); ok('spot claimed for the signed-in player, for the chosen game');
 }
 
 console.log(`\n${passed} server checks passed`);

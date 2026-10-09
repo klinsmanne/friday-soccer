@@ -1,4 +1,4 @@
-// Friday Soccer server: serves the website, talks to Stripe, and runs the every-minute schedule.
+// Midwest FC server: serves the website, talks to Stripe, and runs the every-minute schedule.
 import { connect } from 'cloudflare:sockets';
 import { rpc, getUser } from './supa.js';
 import { stripe, verifyWebhook } from './stripe.js';
@@ -16,7 +16,9 @@ async function checkout(request, env) {
   const user = await getUser(env, bearer(request));
   if (!user) return json({ error: 'Please sign in again.' }, 401);
 
-  const claim = await rpc(env, 'claim_spot', { p_user: user.id });
+  const { game_id } = await request.json().catch(() => ({}));
+  if (!game_id) return json({ error: 'Which game? Please refresh and try again.' }, 400);
+  const claim = await rpc(env, 'claim_spot', { p_user: user.id, p_game: Number(game_id) });
   if (claim.error) return json({ error: claim.error }, 400);
   if (claim.action !== 'pay') return json(claim);
 
@@ -120,7 +122,7 @@ export default {
       if (path === '/api/latest' && request.method === 'POST') {
         const { endpoint } = await request.json().catch(() => ({}));
         const msg = endpoint ? await rpc(env, 'latest_for_endpoint', { p_endpoint: endpoint }) : null;
-        return json(msg || { title: 'Friday Soccer', body: 'Open the app for the latest update.' });
+        return json(msg || { title: 'Midwest FC', body: 'Open the app for the latest update.' });
       }
       if (path === '/api/kick' && request.method === 'POST') {
         // After a player or the organizer changes something, process refunds/messages right away.

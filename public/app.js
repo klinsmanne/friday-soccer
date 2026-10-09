@@ -301,24 +301,33 @@ function actionHtml(v, me) {
   if (full) return `${btn('pay', 'Join the waitlist')}
       <div class="sub">Free to join. If a spot opens, you'll get ${(new Date(g.kickoff_at) - Date.now()) < 6 * 3600e3 ? '30 minutes' : '2 hours'} to pay ${price}.</div>`;
   return `${btn('pay', `Sign up & pay ${price}`)}
-    <div class="sub">${new Date() < new Date(g.drop_deadline_at) ? `Your card is only charged ${whenOf(g.drop_deadline_at)}. Drop before then for free.` : 'Apple Pay, Google Pay or card.'}</div>`;
+    <div class="sub">${new Date() < new Date(g.drop_deadline_at) && new Date(g.drop_deadline_at) - Date.now() < 6 * 864e5 ? `Your card is only charged ${whenOf(g.drop_deadline_at)}. Drop before then for free.` : 'Apple Pay, Google Pay or card.'}</div>`;
 }
 
+const viewsOf = (sec) => sec.views || (sec.view ? [sec.view] : []);
+
 function sectionHtml(sec, me) {
-  const v = sec.view;
-  if (!v) {
-    return `<h2 class="section-title">${esc(sec.category)} ${badgeHtml([sec.badge])}</h2>
-      <section class="card center muted">No ${esc(sec.category)} are scheduled yet. You'll get an email when sign-ups open.</section>`;
+  const views = viewsOf(sec);
+  const head = `<h2 class="section-title">${esc(sec.category)} ${badgeHtml([sec.badge])}</h2>`;
+  if (!views.length) {
+    return `${head}<section class="card center muted">No ${esc(sec.category)} are scheduled yet. You'll get an email when sign-ups open.</section>`;
   }
+  return head + views.map((v) => gameBlockHtml(v, me)).join('') +
+    (sec.upcoming.length ? `<section class="card"><details><summary>Upcoming ${esc(sec.category)} (${sec.upcoming.length})</summary>
+      ${sec.upcoming.map((u) => `<div class="row-item"><div class="who"><b>${esc(longDay(u.kickoff_at))}</b>
+        <span>${u.cancelled ? 'Cancelled' : `${esc(timeOf(u.kickoff_at))} · sign-ups open ${esc(whenOf(u.opens_at))}, ${esc(dayOf(u.opens_at))}`}</span></div></div>`).join('')}
+      </details></section>` : '');
+}
+
+function gameBlockHtml(v, me) {
   const g = v.game;
   const pct = Math.min(100, Math.round((g.spots_taken / g.max_players) * 100));
   const lateDrop = v.my && v.my.status === 'dropped' && v.my.late_drop_refund === 'pending'
     ? `<div class="notice warn">You dropped after the deadline. If someone takes your spot, you'll be refunded automatically.</div>` : '';
   const names = (list, extra) => list.map((p) => `<li class="${p.me ? 'me' : ''}"><span class="nm">${esc(p.name)}</span>${badgeHtml(p.badges)}${extra(p)}${p.me ? ' <span class="tag">You</span>' : ''}</li>`).join('');
-  return `<h2 class="section-title">${esc(sec.category)} ${badgeHtml([sec.badge])}</h2>
-    ${lateDrop}
+  return `${lateDrop}
     <section class="card game">
-      <div class="kicker">${g.phase === 'closed' ? 'Today' : 'Next game'}</div>
+      <div class="kicker">${g.is_test ? 'Test game · practice sign-up' : g.phase === 'closed' ? 'Today' : 'Next game'}</div>
       <h1>${esc(dayOf(g.kickoff_at))}</h1>
       <div class="meta">${esc(timeOf(g.kickoff_at))} – ${esc(timeOf(g.ends_at))} · ${esc(g.location)}</div>
       <div class="spots"><b>${g.spots_taken}</b><span class="of">/${g.max_players}</span><span class="label">spots taken${g.waitlist_count ? ` · ${g.waitlist_count} waiting` : ''}</span></div>
@@ -332,11 +341,7 @@ function sectionHtml(sec, me) {
       ${v.paying_count ? `<p class="muted small">+ ${v.paying_count} paying right now</p>` : ''}
     </section>
     ${v.waitlist.length ? `<section class="card"><h2>Waitlist (${v.waitlist.length})</h2>
-      <ol class="names">${names(v.waitlist, (p) => (p.offered ? ' <span class="tag warn">Spot offered</span>' : ''))}</ol></section>` : ''}
-    ${sec.upcoming.length ? `<section class="card"><details><summary>Upcoming ${esc(sec.category)} (${sec.upcoming.length})</summary>
-      ${sec.upcoming.map((u) => `<div class="row-item"><div class="who"><b>${esc(longDay(u.kickoff_at))}</b>
-        <span>${u.cancelled ? 'Cancelled' : `${esc(timeOf(u.kickoff_at))} · sign-ups open ${esc(whenOf(u.opens_at))}, ${esc(dayOf(u.opens_at))}`}</span></div></div>`).join('')}
-      </details></section>` : ''}`;
+      <ol class="names">${names(v.waitlist, (p) => (p.offered ? ' <span class="tag warn">Spot offered</span>' : ''))}</ol></section>` : ''}`;
 }
 
 function renderHome() {
@@ -345,7 +350,7 @@ function renderHome() {
   S.skew = new Date(h.server_now).getTime() - Date.now();
   const params = new URLSearchParams(location.search);
   let banner = '';
-  const anyConfirmedNow = h.sections.some((s) => s.view && s.view.my && s.view.my.status === 'confirmed');
+  const anyConfirmedNow = h.sections.some((s) => viewsOf(s).some((v) => v.my && v.my.status === 'confirmed'));
   if (params.get('paid')) {
     banner = anyConfirmedNow ? `<div class="notice ok"><b>Payment received — you're in!</b></div>`
       : `<div class="notice ok"><b>Payment received.</b> Confirming your spot…</div>`;
@@ -391,9 +396,9 @@ function renderHome() {
 }
 
 async function handleAction(act, gameId, btn) {
-  const sec = S.home.sections.find((s) => s.view && s.view.game.id === gameId);
-  if (!sec) return;
-  const g = sec.view.game, my = sec.view.my;
+  const view = S.home.sections.flatMap(viewsOf).find((v) => v.game.id === gameId);
+  if (!view) return;
+  const g = view.game, my = view.my;
   if (act === 'pay') {
     btn.disabled = true; btn.textContent = 'One moment…';
     try {
@@ -490,7 +495,7 @@ const payTag = (r) => ({
   refund_pending: '<span class="tag warn">Refunding</span>', refunded: '<span class="tag grey">Refunded</span>',
   released: '<span class="tag grey">Released</span>', none: '',
 }[r.pay_state] || '');
-const phaseText = (g) => ({ upcoming: `Opens ${whenOf(g.opens_at)}, ${dayOf(g.opens_at)}`, open: `Open until ${whenOf(g.closes_at)}`, closed: 'Sign-ups closed', done: 'Finished', cancelled: 'Cancelled' }[g.phase]);
+const phaseText = (g) => (g.is_test && g.phase === 'open') ? 'Test game · open until you close it' : ({ upcoming: `Opens ${whenOf(g.opens_at)}, ${dayOf(g.opens_at)}`, open: `Open until ${whenOf(g.closes_at)}`, closed: 'Sign-ups closed', done: 'Finished', cancelled: 'Cancelled' }[g.phase]);
 
 async function renderAdmin(tab, id) {
   const pend = S.home.pending_requests;
@@ -559,13 +564,13 @@ async function adminGame(shell, gameId) {
     <p class="small"><a href="#/admin/games">‹ All games</a></p>
     <section class="card"><h2>${esc(g.category)} ${badgeHtml([g.badge])}</h2>
       <p style="margin:0"><b>${esc(longDay(g.kickoff_at))}</b> · ${esc(timeOf(g.kickoff_at))} · ${esc(g.location)}</p>
-      <p class="muted small" style="margin:4px 0 0">${esc(phaseText(g))} · drop deadline ${esc(whenOf(g.drop_deadline_at))}</p></section>
+      <p class="muted small" style="margin:4px 0 0">${esc(phaseText(g))}${g.is_test ? ' · drop any time for a refund' : ` · drop deadline ${esc(whenOf(g.drop_deadline_at))}`}</p></section>
     ${b.failed_tasks ? `<div class="notice warn">${b.failed_tasks} payment action(s) failed. Check your Stripe dashboard.</div>` : ''}
     <div class="stats">
       <div class="stat"><b>${g.spots_taken}/${g.max_players}</b><span>Spots taken</span></div>
       <div class="stat"><b>${g.waitlist_count}</b><span>Waitlist</span></div>
       <div class="stat"><b>${money(b.collected_cents)}</b><span>Collected</span></div>
-      <div class="stat"><b>${money(b.on_hold_cents)}</b><span>On hold (charged ${esc(whenOf(g.drop_deadline_at))})</span></div>
+      <div class="stat"><b>${money(b.on_hold_cents)}</b><span>${g.is_test ? 'On hold' : `On hold (charged ${esc(whenOf(g.drop_deadline_at))})`}</span></div>
     </div>
     ${g.phase !== 'cancelled' ? `<div class="btn-row" style="margin-bottom:14px">
       <button class="btn dark" id="add-me">Add myself</button>

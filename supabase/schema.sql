@@ -88,9 +88,12 @@ create table if not exists public.games (
   reminder_sent     boolean not null default false,
   captured_at       timestamptz,
   closed_processed  boolean not null default false,
+  is_test           boolean not null default false,
   created_at        timestamptz not null default now(),
   unique (category_id, kickoff_at)
 );
+-- A test game is labelled "Test game" in the app and stays open until the organizer closes it.
+alter table public.games add column if not exists is_test boolean not null default false;
 create index if not exists games_upcoming on public.games (ends_at, kickoff_at);
 
 create table if not exists public.registrations (
@@ -497,10 +500,12 @@ language sql stable security definer set search_path = public as $$
     'id', g.id, 'phase', game_phase(g), 'category_id', g.category_id,
     'category', (select name from categories where id = g.category_id),
     'badge', (select badge from categories where id = g.category_id),
-    'kickoff_at', g.kickoff_at, 'ends_at', g.ends_at, 'location', g.location,
+    'kickoff_at', g.kickoff_at, 'location', g.location,
+    'ends_at', case when g.is_test then g.kickoff_at + make_interval(mins => (select duration_minutes from categories where id = g.category_id))
+                    else g.ends_at end,
     'price_cents', g.price_cents, 'max_players', g.max_players,
     'opens_at', g.opens_at, 'closes_at', g.closes_at, 'drop_deadline_at', g.drop_deadline_at,
-    'cancel_reason', g.cancel_reason,
+    'cancel_reason', g.cancel_reason, 'is_test', g.is_test,
     'spots_taken', active_count(g.id),
     'confirmed_count', (select count(*) from registrations where game_id = g.id and status = 'confirmed'),
     'waitlist_count', (select count(*) from registrations where game_id = g.id and status in ('waitlisted','offered'))
@@ -540,18 +545,25 @@ end $$;
 
 create or replace function public.get_home() returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare p profiles := me(); sections jsonb := '[]'::jsonb; c categories; g games;
+declare p profiles := me(); sections jsonb := '[]'::jsonb; c categories; g games; shown bigint[]; views jsonb;
 begin
   for c in select * from categories where active order by sort loop
     continue when not is_member(p.id, c.id);
     g := next_game(c.id);
+    -- Show the next game, plus any other game whose sign-ups are already open (e.g. a test game left open).
+    select coalesce(array_agg(x.id order by x.kickoff_at), '{}') into shown
+      from games x where x.category_id = c.id and x.ends_at > now()
+       and (x.id = g.id or game_phase(x) in ('open','closed'));
+    select coalesce(jsonb_agg(game_view(x, p.id) order by x.kickoff_at), '[]'::jsonb) into views
+      from games x where x.id = any(shown);
     sections := sections || jsonb_build_array(jsonb_build_object(
       'category_id', c.id, 'category', c.name, 'badge', c.badge,
       'view', case when g.id is null then null else game_view(g, p.id) end,
+      'views', views,
       'upcoming', coalesce((select jsonb_agg(jsonb_build_object('id', x.id, 'kickoff_at', x.kickoff_at, 'opens_at', x.opens_at,
                                                                'cancelled', x.cancelled_at is not null) order by x.kickoff_at)
                               from (select * from games where category_id = c.id and ends_at > now()
-                                    order by kickoff_at offset 1 limit 12) x), '[]'::jsonb)));
+                                    and not (id = any(shown)) order by kickoff_at limit 12) x), '[]'::jsonb)));
   end loop;
   return jsonb_build_object(
     'server_now', now(),
@@ -1225,8 +1237,8 @@ begin
   update games set location = coalesce(nullif(trim(p_location), ''), location),
                    max_players = coalesce(p_max_players, max_players),
                    kickoff_at = k,
-                   ends_at = k + make_interval(mins => c.duration_minutes),
-                   closes_at = k - make_interval(mins => c.close_minutes_before)
+                   ends_at = case when is_test then ends_at else k + make_interval(mins => c.duration_minutes) end,
+                   closes_at = case when is_test then closes_at else k - make_interval(mins => c.close_minutes_before) end
    where id = g.id;
   perform promote(g.id);
   return jsonb_build_object('ok', true);

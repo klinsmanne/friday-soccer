@@ -17,7 +17,7 @@ export class StripeError extends Error {
 export async function stripe(env, method, path, params, idempotencyKey) {
   if (!env.STRIPE_SECRET_KEY) throw new Error('STRIPE_SECRET_KEY is not set');
   const headers = {
-    Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+    Authorization: `Bearer ${String(env.STRIPE_SECRET_KEY).trim()}`,
     'Stripe-Version': '2024-06-20',
   };
   let body;

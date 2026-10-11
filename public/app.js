@@ -271,7 +271,7 @@ function inQuietNow() {
 }
 
 function actionHtml(v, me) {
-  const g = v.game, my = v.my, price = money(g.price_cents), gid = g.id;
+  const g = v.game, my = v.my, price = money(g.price_cents), gid = g.id, free = !g.price_cents;
   const active = my && ['holding', 'confirmed', 'waitlisted', 'offered'].includes(my.status) ? my : null;
   const full = g.spots_taken >= g.max_players;
   const btn = (act, label, cls = '') => `<button class="btn ${cls}" data-act="${act}" data-game="${gid}">${label}</button>`;
@@ -281,7 +281,7 @@ function actionHtml(v, me) {
   if (active && active.status === 'confirmed') {
     const held = active.pay_state === 'authorized';
     return `<div class="status in">You're in ✓<small>${active.is_manual ? 'Added by the organizer' :
-      held ? `Card on hold for ${price} · charged ${whenOf(g.drop_deadline_at)}` : 'Paid'}</small></div>
+      held ? `Card on hold for ${price} · charged ${whenOf(g.drop_deadline_at)}` : free ? 'Free game' : 'Paid'}</small></div>
       ${link('drop', 'I can\'t make it — drop out')}`;
   }
   if (active && active.status === 'holding') {
@@ -299,7 +299,7 @@ function actionHtml(v, me) {
       ${link('drop', 'I can\'t make it — release my spot')}`;
   }
   if (active && active.status === 'offered') {
-    return `${btn('pay', `Spot available — pay ${price}`)}
+    return `${btn('pay', free ? 'Spot available — take it' : `Spot available — pay ${price}`)}
       <div class="sub">${inQuietNow() ? `Pay by <b>${whenOf(active.offer_expires_at)}</b> (clock paused overnight)`
         : `Pay within <b class="countdown" data-until="${active.offer_expires_at}">${remaining(active.offer_expires_at)}</b> or it goes to the next person`}</div>
       ${link('drop', 'No thanks, give it to the next person')}`;
@@ -312,7 +312,8 @@ function actionHtml(v, me) {
   if (g.phase !== 'open') return `<div class="status off">Sign-ups closed</div>`;
   if (me.blocked) return `<div class="status off">Contact the organizer to play</div>`;
   if (full) return `${btn('pay', 'Join the waitlist')}
-      <div class="sub">Free to join. If a spot opens, you'll get ${(new Date(g.kickoff_at) - Date.now()) < 6 * 3600e3 ? '30 minutes' : '2 hours'} to pay ${price}.</div>`;
+      <div class="sub">Free to join. If a spot opens, you'll get ${(new Date(g.kickoff_at) - Date.now()) < 6 * 3600e3 ? '30 minutes' : '2 hours'} to ${free ? 'take it' : 'pay ' + price}.</div>`;
+  if (free) return `${btn('pay', 'Sign up — free')}<div class="sub">No payment needed for this game.</div>`;
   return `${btn('pay', `Sign up & pay ${price}`)}
     <div class="sub">${new Date() < new Date(g.drop_deadline_at) && new Date(g.drop_deadline_at) - Date.now() < 6 * 864e5 ? `Your card is only charged ${whenOf(g.drop_deadline_at)}. Drop before then for free.` : 'Apple Pay, Google Pay or card.'}</div>`;
 }
@@ -433,6 +434,7 @@ async function handleAction(act, gameId, btn) {
       const r = await api('checkout', { game_id: gameId });
       if (r.action === 'redirect') { location.href = r.url; return; }
       if (r.action === 'waitlisted') toast(`You're #${r.position} on the waitlist`);
+      if (r.action === 'confirmed') toast('You\'re in! ✓');
       await loadHome();
     } catch (e) { toast(e.message, 5000); await loadHome(); }
     return;

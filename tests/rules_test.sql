@@ -244,4 +244,16 @@ select task_done(id, true, 'released', 805, 're_x', null) from stripe_tasks wher
 select pg_temp.check((pg_temp.reg(3)).pay_state = 'released', 'release recorded');
 select pg_temp.check((select count(*) = 1 from outbox where user_id = pg_temp.u(3) and kind = 'refund_issued'), 'player told about refund');
 
+-- 15. Free game (e.g. the test game): no payment needed
+select pg_temp.at('2026-10-19 16:30 America/Chicago');
+select pg_temp.as_user(1);
+update games set price_cents = 0 where id = pg_temp.fri('2026-10-30');
+update games set opens_at = '2026-10-19 14:00 America/Chicago' where id = pg_temp.fri('2026-10-30');
+select pg_temp.check((claim_spot(pg_temp.u(12), pg_temp.fri('2026-10-30'))->>'action') = 'confirmed'
+                     and (pg_temp.reg(12)).status = 'confirmed' and (pg_temp.reg(12)).pay_state = 'manual', 'free game: sign-up confirmed with no payment');
+select admin_add(pg_temp.fri('2026-10-30'), pg_temp.u(13));
+select pg_temp.check((pg_temp.reg(13)).status = 'confirmed', 'free game: organizer add is confirmed straight away');
+select pg_temp.as_user(12);
+select pg_temp.check((drop_out(pg_temp.fri('2026-10-30'))->>'message') = 'You''re out.', 'free game: dropping needs no refund');
+
 select 'ALL RULE TESTS PASSED' as result;

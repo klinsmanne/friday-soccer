@@ -433,6 +433,11 @@ create or replace function public.reserve_spot(g public.games, p_user uuid, p_re
 language plpgsql security definer set search_path = public as $$
 declare r registrations;
 begin
+  if g.price_cents = 0 then   -- free game: nothing to pay, so the player is simply in
+    insert into registrations (game_id, user_id, status, pay_state, amount_cents, paid_at, reserved_by)
+    values (g.id, p_user, 'confirmed', 'manual', 0, now(), p_reason) returning * into r;
+    return r;
+  end if;
   insert into registrations (game_id, user_id, status, offer_started_at, offer_expires_at, reserved_by)
   values (g.id, p_user, 'offered', now(), reserve_deadline(g), p_reason)
   returning * into r;
@@ -680,6 +685,20 @@ returns jsonb language sql stable security definer set search_path = public as $
     'expires_at', case when r.status = 'holding' then r.hold_expires_at else r.offer_expires_at end,
     'checkout_session_id', r.checkout_session_id, 'checkout_url', r.checkout_url) $$;
 
+-- Free games (price $0, e.g. the test game) skip Stripe: the spot is confirmed straight away.
+create or replace function public.pay_or_free(r public.registrations, g public.games, p public.profiles)
+returns jsonb language plpgsql security definer set search_path = public as $$
+begin
+  if g.price_cents > 0 then return pay_info(r, g, p); end if;
+  update registrations set status = 'confirmed', pay_state = 'manual', amount_cents = 0, paid_at = now(),
+         hold_expires_at = null, offer_expires_at = null
+   where id = r.id;
+  perform notify(r.user_id, 'payment_confirmed', 'You''re in! ✓',
+    'Your spot in ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || ' at ' || fmt_time(g.kickoff_at) ||
+    ' (' || g.location || ') is confirmed. This game is free.');
+  return jsonb_build_object('action', 'confirmed', 'registration_id', r.id);
+end $$;
+
 create or replace function public.claim_spot(p_user uuid, p_game bigint) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare
@@ -700,7 +719,7 @@ begin
   -- before the game, even before sign-ups open.
   select * into r from registrations
    where game_id = g.id and user_id = p_user and status = 'offered' and reserved_by is not null;
-  if found and ph in ('upcoming','open','closed') then return pay_info(r, g, p); end if;
+  if found and ph in ('upcoming','open','closed') then return pay_or_free(r, g, p); end if;
 
   if not is_member(p_user, g.category_id) then
     return jsonb_build_object('error', 'Only approved ' || cat_name(g.category_id) || ' members can sign up.');
@@ -715,7 +734,7 @@ begin
   select * into r from registrations
    where game_id = g.id and user_id = p_user and status in ('holding','confirmed','waitlisted','offered');
   if found then
-    if r.status in ('holding','offered') then return pay_info(r, g, p); end if;
+    if r.status in ('holding','offered') then return pay_or_free(r, g, p); end if;
     return jsonb_build_object('action', 'none', 'status', r.status);
   end if;
 
@@ -724,7 +743,7 @@ begin
     insert into registrations (game_id, user_id, status, hold_expires_at)
     values (g.id, p_user, 'holding', now() + make_interval(mins => s.hold_minutes))
     returning * into r;
-    return pay_info(r, g, p);
+    return pay_or_free(r, g, p);
   end if;
 
   insert into registrations (game_id, user_id, status)
@@ -1459,6 +1478,12 @@ begin
   if game_phase(g) = 'done' then raise exception 'This game is already over.'; end if;
   -- The spot is set aside, but the player still pays for it (in the app) by the deadline.
   r := reserve_spot(g, p_user, 'organizer');
+  if r.status = 'confirmed' then
+    perform notify(p_user, 'added', 'You''re in! ✓',
+      'The organizer added you to ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || ' at ' ||
+      fmt_time(g.kickoff_at) || ' (' || g.location || '). This game is free.');
+    return jsonb_build_object('ok', true);
+  end if;
   perform notify(p_user, 'reserved', 'A spot is saved for you — please pay ⚽',
     'The organizer saved you a spot in ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || ' at ' ||
     fmt_time(g.kickoff_at) || ' (' || g.location || '). Open the app and pay ' || fmt_money(g.price_cents) ||

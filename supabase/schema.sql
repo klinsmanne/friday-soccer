@@ -1015,7 +1015,9 @@ begin
             where mw.game_id = g.id loop
     msg := 'Congrats — you were voted Man of the Match for ' || cat_name(g.category_id) || ' on ' ||
            fmt_day(g.kickoff_at) || ' (' || w.votes || ' vote' || case when w.votes = 1 then '' else 's' end || ')! ';
-    if ng.id is null then
+    if g.is_test then
+      msg := msg || 'This was a test game, so no spot was saved in a real game.';
+    elsif ng.id is null then
       msg := msg || 'There''s no next game scheduled yet, so no spot could be saved.';
     elsif exists (select 1 from registrations where game_id = ng.id and user_id = w.user_id
                    and status in ('holding','confirmed','waitlisted','offered')) then

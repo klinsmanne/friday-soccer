@@ -17,10 +17,15 @@ Status check: https://signup.midwestfc.workers.dev/api/health — every line sho
 - When full, players join the waitlist for free. When a spot opens, the next person gets an email and 2 hours to pay
   (30 minutes on game day). The clock pauses 10 PM–9 AM. If they don't pay, it goes to the next person.
 - Game-day reminder at 9 AM Friday.
+- **Man of the Match:** after each game, everyone who played gets a notification to vote (not for themselves) until
+  the next Monday 10 AM CT; a reminder goes out a day before. The winner (ties: all tied players) gets a 🏆 MOTM badge
+  and a spot saved in the next game, which they still have to pay for (within 2 hours of sign-ups opening, or it goes to
+  the waitlist). Past winners and a leaderboard: 🏆 MOTM link at the bottom of the app.
 
 ## Organizer (Organizer button at the top of the app)
 - **Games**: every scheduled game per group. Tap one for its board: who's playing, waitlist, money collected/on hold;
-  move people ↑↓; remove (with or without refund); "Add a player" (free spot); change location, max players, kickoff;
+  move people ↑↓; remove (with or without refund); "Add a player" saves them a spot that they must pay for
+  (they get an email; unpaid saved spots are released and you're told); change location, max players, kickoff;
   cancel the game (refunds everyone); delete an empty game. "Add weekly games" / "Add one game" create new slots.
 - **Members**: join requests at the top (Approve / Decline). Filter by group, search, and "Manage" a person to
   approve/remove them per group, make them organizer, or block them.

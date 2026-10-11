@@ -48,6 +48,10 @@ insert into public.categories (id, name, badge, sort, kickoff_time, opens_dow, o
 values ('friday', 'Friday Games', 'FRI', 1, '22:00', 1, '14:00', 4, '20:00'),
        ('wednesday', 'Wednesday Games', 'WED', 2, '20:00', 1, '14:00', 2, '20:00')
 on conflict (id) do nothing;
+-- Man of the Match: voting closes on this weekday/time after each game (default Monday 10 AM).
+alter table public.categories add column if not exists motm_enabled    boolean not null default true;
+alter table public.categories add column if not exists motm_close_dow  int not null default 1 check (motm_close_dow between 0 and 6);
+alter table public.categories add column if not exists motm_close_time time not null default '10:00';
 
 create table if not exists public.profiles (
   id                  uuid primary key references auth.users (id) on delete cascade,
@@ -94,6 +98,10 @@ create table if not exists public.games (
 );
 -- A test game is labelled "Test game" in the app and stays open until the organizer closes it.
 alter table public.games add column if not exists is_test boolean not null default false;
+-- Man of the Match voting for a finished game: null = not started, open, closed, skipped.
+alter table public.games add column if not exists motm_state text check (motm_state in ('open','closed','skipped'));
+alter table public.games add column if not exists motm_closes_at timestamptz;
+alter table public.games add column if not exists motm_reminded boolean not null default false;
 create index if not exists games_upcoming on public.games (ends_at, kickoff_at);
 
 create table if not exists public.registrations (
@@ -117,8 +125,10 @@ create table if not exists public.registrations (
   paid_at              timestamptz,
   ended_at             timestamptz,
   late_drop_refund     text check (late_drop_refund in ('pending','refunded','forfeited')),
-  is_manual            boolean not null default false
+  is_manual            boolean not null default false,
+  reserved_by          text check (reserved_by in ('organizer','motm'))  -- spot set aside for this player (they still pay)
 );
+alter table public.registrations add column if not exists reserved_by text check (reserved_by in ('organizer','motm'));
 -- A player can hold only one active place per game.
 create unique index if not exists registrations_one_active
   on public.registrations (game_id, user_id)
@@ -178,6 +188,23 @@ create table if not exists public.app_secrets (
   updated_at timestamptz not null default now()
 );
 
+-- Man of the Match votes (one per player per game; can be changed until voting closes) and winners.
+create table if not exists public.motm_votes (
+  game_id       bigint not null references public.games (id) on delete cascade,
+  voter_id      uuid   not null references public.profiles (id) on delete cascade,
+  candidate_id  uuid   not null references public.profiles (id) on delete cascade,
+  created_at    timestamptz not null default now(),
+  primary key (game_id, voter_id)
+);
+create table if not exists public.motm_winners (
+  game_id          bigint not null references public.games (id) on delete cascade,
+  user_id          uuid   not null references public.profiles (id) on delete cascade,
+  votes            int    not null,
+  reserved_game_id bigint references public.games (id) on delete set null,
+  created_at       timestamptz not null default now(),
+  primary key (game_id, user_id)
+);
+
 -- Lock every table down: the website never reads tables directly,
 -- only through the functions below.
 alter table public.settings            enable row level security;
@@ -191,6 +218,8 @@ alter table public.stripe_tasks        enable row level security;
 alter table public.outbox              enable row level security;
 alter table public.push_subscriptions  enable row level security;
 alter table public.app_secrets         enable row level security;
+alter table public.motm_votes          enable row level security;
+alter table public.motm_winners        enable row level security;
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
 
@@ -387,6 +416,29 @@ begin
   end loop;
 end $$;
 
+-- Pay-by time for a spot set aside for someone: the usual offer window, starting when sign-ups open
+-- (or now, if they're already open). After sign-ups close they get the short game-day window.
+create or replace function public.reserve_deadline(g public.games) returns timestamptz
+language plpgsql stable security definer set search_path = public as $$
+declare s settings;
+begin
+  select * into s from settings where id = 1;
+  if game_phase(g) = 'closed' then return now() + make_interval(mins => s.late_offer_minutes); end if;
+  return offer_deadline(g, greatest(now(), g.opens_at));
+end $$;
+
+-- Sets a spot aside for a player (organizer add, or Man of the Match prize). They still have to pay
+-- by the deadline; if they don't, the spot goes to the waitlist. Caller must hold the game lock.
+create or replace function public.reserve_spot(g public.games, p_user uuid, p_reason text) returns public.registrations
+language plpgsql security definer set search_path = public as $$
+declare r registrations;
+begin
+  insert into registrations (game_id, user_id, status, offer_started_at, offer_expires_at, reserved_by)
+  values (g.id, p_user, 'offered', now(), reserve_deadline(g), p_reason)
+  returning * into r;
+  return r;
+end $$;
+
 -- ---------------------------------------------------------------------
 -- Accounts and memberships
 -- ---------------------------------------------------------------------
@@ -443,6 +495,9 @@ language sql stable security definer set search_path = public as $$
 create or replace function public.badges_of(p_user uuid) returns jsonb
 language sql stable security definer set search_path = public as $$
   select coalesce(jsonb_agg(c.badge order by c.sort), '[]'::jsonb)
+         -- Man of the Match winners get a trophy badge ("MOTM", or "MOTM x3" for three wins).
+         || coalesce((select jsonb_build_array(case when count(*) = 1 then 'MOTM' else 'MOTM x' || count(*) end)
+                        from motm_winners w where w.user_id = p_user having count(*) > 0), '[]'::jsonb)
     from memberships m join categories c on c.id = m.category_id
    where m.user_id = p_user and m.status = 'approved' $$;
 
@@ -508,7 +563,8 @@ language sql stable security definer set search_path = public as $$
     'cancel_reason', g.cancel_reason, 'is_test', g.is_test,
     'spots_taken', active_count(g.id),
     'confirmed_count', (select count(*) from registrations where game_id = g.id and status = 'confirmed'),
-    'waitlist_count', (select count(*) from registrations where game_id = g.id and status in ('waitlisted','offered'))
+    'waitlist_count', (select count(*) from registrations where game_id = g.id and status in ('waitlisted','offered')
+                         and reserved_by is null)
   ) $$;
 
 -- Everything about one game for one player: the game, their place, the lists.
@@ -519,9 +575,9 @@ begin
   select * into r from registrations
     where game_id = g.id and user_id = p_user
     order by (status in ('holding','confirmed','waitlisted','offered')) desc, id desc limit 1;
-  if r.status in ('waitlisted','offered') then
+  if r.status in ('waitlisted','offered') and r.reserved_by is null then
     select count(*) + 1 into pos from registrations
-      where game_id = g.id and status in ('waitlisted','offered')
+      where game_id = g.id and status in ('waitlisted','offered') and reserved_by is null
         and (sort_at, id) < (r.sort_at, r.id);
   end if;
   return jsonb_build_object(
@@ -529,18 +585,25 @@ begin
     'my', case when r.id is null then null else jsonb_build_object(
             'id', r.id, 'status', r.status, 'position', pos, 'pay_state', r.pay_state,
             'hold_expires_at', r.hold_expires_at, 'offer_expires_at', r.offer_expires_at,
-            'checkout_url', r.checkout_url, 'late_drop_refund', r.late_drop_refund, 'is_manual', r.is_manual) end,
+            'checkout_url', r.checkout_url, 'late_drop_refund', r.late_drop_refund, 'is_manual', r.is_manual,
+            'reserved_by', r.reserved_by) end,
     'confirmed', coalesce((select jsonb_agg(jsonb_build_object('name', coalesce(pr.full_name, 'Player'), 'me', pr.id = p_user,
                                                               'badges', badges_of(pr.id))
                                             order by x.sort_at, x.id)
                              from registrations x join profiles pr on pr.id = x.user_id
                             where x.game_id = g.id and x.status = 'confirmed'), '[]'::jsonb),
     'paying_count', (select count(*) from registrations where game_id = g.id and status = 'holding'),
+    -- Spots set aside for someone (organizer add / Man of the Match) who hasn't paid yet.
+    'reserved', coalesce((select jsonb_agg(jsonb_build_object('name', coalesce(pr.full_name, 'Player'), 'me', pr.id = p_user,
+                                                             'reason', x.reserved_by, 'badges', badges_of(pr.id))
+                                           order by x.sort_at, x.id)
+                            from registrations x join profiles pr on pr.id = x.user_id
+                           where x.game_id = g.id and x.status = 'offered' and x.reserved_by is not null), '[]'::jsonb),
     'waitlist', coalesce((select jsonb_agg(jsonb_build_object('name', coalesce(pr.full_name, 'Player'), 'me', pr.id = p_user,
                                                              'offered', x.status = 'offered', 'badges', badges_of(pr.id))
                                            order by x.sort_at, x.id)
                             from registrations x join profiles pr on pr.id = x.user_id
-                           where x.game_id = g.id and x.status in ('waitlisted','offered')), '[]'::jsonb));
+                           where x.game_id = g.id and x.status in ('waitlisted','offered') and x.reserved_by is null), '[]'::jsonb));
 end $$;
 
 create or replace function public.get_home() returns jsonb
@@ -560,6 +623,7 @@ begin
       'category_id', c.id, 'category', c.name, 'badge', c.badge,
       'view', case when g.id is null then null else game_view(g, p.id) end,
       'views', views,
+      'last_motm', last_motm(c.id, p.id),
       'upcoming', coalesce((select jsonb_agg(jsonb_build_object('id', x.id, 'kickoff_at', x.kickoff_at, 'opens_at', x.opens_at,
                                                                'cancelled', x.cancelled_at is not null) order by x.kickoff_at)
                               from (select * from games where category_id = c.id and ends_at > now()
@@ -576,6 +640,7 @@ begin
                                from categories c2 left join memberships m on m.category_id = c2.id and m.user_id = p.id
                               where c2.active), '[]'::jsonb),
     'pending_requests', case when p.is_admin then (select count(*) from memberships where status = 'pending') else 0 end,
+    'motm_ballots', motm_ballots(p.id),
     'sections', sections);
 end $$;
 
@@ -630,11 +695,16 @@ begin
   if p.blocked then
     return jsonb_build_object('error', 'Your account can''t sign up right now. Please contact the organizer.');
   end if;
+  ph := game_phase(g);
+  -- A spot already set aside for this player (organizer add / Man of the Match) can be paid for any time
+  -- before the game, even before sign-ups open.
+  select * into r from registrations
+   where game_id = g.id and user_id = p_user and status = 'offered' and reserved_by is not null;
+  if found and ph in ('upcoming','open','closed') then return pay_info(r, g, p); end if;
+
   if not is_member(p_user, g.category_id) then
     return jsonb_build_object('error', 'Only approved ' || cat_name(g.category_id) || ' members can sign up.');
   end if;
-
-  ph := game_phase(g);
   if ph <> 'open' then
     return jsonb_build_object('error', case ph
       when 'upcoming'  then 'Sign-ups open ' || fmt_day(g.opens_at) || ' at ' || fmt_time(g.opens_at) || '.'
@@ -659,7 +729,7 @@ begin
 
   insert into registrations (game_id, user_id, status)
   values (g.id, p_user, 'waitlisted') returning * into r;
-  select count(*) into pos from registrations where game_id = g.id and status in ('waitlisted','offered');
+  select count(*) into pos from registrations where game_id = g.id and status in ('waitlisted','offered') and reserved_by is null;
   return jsonb_build_object('action', 'waitlisted', 'registration_id', r.id, 'position', pos);
 end $$;
 
@@ -825,8 +895,17 @@ begin
              and offer_expires_at < now() and pay_state = 'none' for update loop
     update registrations set status = 'expired', ended_at = now() where id = r.id;
     perform close_session(r);
-    perform notify(r.user_id, 'offer_expired', 'Your offer expired',
-      'Time ran out on the spot you were offered, so it moved to the next person. You can join the waitlist again in the app.');
+    if r.reserved_by is not null then
+      perform notify(r.user_id, 'offer_expired', 'Your saved spot was released',
+        'The spot saved for you in ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) ||
+        ' wasn''t paid in time, so it went to the next person. You can still sign up in the app if there''s room.');
+      perform notify_admins('admin_reserved_expired', 'Saved spot not paid',
+        (select coalesce(full_name, email) from profiles where id = r.user_id) || ' didn''t pay for their saved spot in ' ||
+        cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || ', so it was released.');
+    else
+      perform notify(r.user_id, 'offer_expired', 'Your offer expired',
+        'Time ran out on the spot you were offered, so it moved to the next person. You can join the waitlist again in the app.');
+    end if;
     n_offer := n_offer + 1;
   end loop;
 
@@ -881,6 +960,210 @@ begin
 end $$;
 
 -- Every game that is open, or recently closed and not yet wrapped up.
+-- ---------------------------------------------------------------------
+-- Man of the Match
+-- After a game, the players who played vote (not for themselves) until the category's closing time
+-- (default the following Monday 10 AM). The winner (ties: all tied players) gets the MOTM badge and a
+-- spot saved in the next game of that category, which they still pay for.
+-- ---------------------------------------------------------------------
+
+create or replace function public.played(p_game bigint, p_user uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from registrations where game_id = p_game and user_id = p_user and status = 'confirmed') $$;
+
+-- First time on the given weekday/time (Central) after ts.
+create or replace function public.next_weekday_time(ts timestamptz, p_dow int, t time) returns timestamptz
+language plpgsql stable as $$
+declare d date := (ts at time zone public.tz())::date; c timestamptz;
+begin
+  d := d + ((7 + p_dow - extract(dow from d)::int) % 7);
+  c := public.local_ts(d, t);
+  if c <= ts then c := public.local_ts(d + 7, t); end if;
+  return c;
+end $$;
+
+create or replace function public.motm_close(p_game bigint) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare g games; ng games; top int; w record; names text; r registrations; msg text;
+begin
+  select * into g from games where id = p_game for update;
+  if g.motm_state is distinct from 'open' then return jsonb_build_object('game', g.id, 'motm', 'not open'); end if;
+
+  select max(n) into top from (select count(*) n from motm_votes where game_id = g.id group by candidate_id) t;
+  update games set motm_state = 'closed' where id = g.id;
+  if top is null then
+    insert into outbox (user_id, kind, title, body)
+    select x.user_id, 'motm_result', 'Man of the Match',
+           'No Man of the Match votes were cast for ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || '.'
+      from registrations x where x.game_id = g.id and x.status = 'confirmed';
+    return jsonb_build_object('game', g.id, 'motm', 'no votes');
+  end if;
+
+  insert into motm_winners (game_id, user_id, votes)
+  select g.id, candidate_id, count(*) from motm_votes where game_id = g.id
+   group by candidate_id having count(*) = top;
+  select string_agg(coalesce(pr.full_name, 'Player'), ' & ' order by pr.full_name) into names
+    from motm_winners mw join profiles pr on pr.id = mw.user_id where mw.game_id = g.id;
+
+  -- Next game in this category gets a spot saved for each winner.
+  select * into ng from games
+   where category_id = g.category_id and kickoff_at > g.kickoff_at and cancelled_at is null and not is_test
+     and game_phase(games) in ('upcoming','open')
+   order by kickoff_at limit 1 for update;
+
+  for w in select mw.user_id, mw.votes, pr.blocked from motm_winners mw join profiles pr on pr.id = mw.user_id
+            where mw.game_id = g.id loop
+    msg := 'Congrats — you were voted Man of the Match for ' || cat_name(g.category_id) || ' on ' ||
+           fmt_day(g.kickoff_at) || ' (' || w.votes || ' vote' || case when w.votes = 1 then '' else 's' end || ')! ';
+    if ng.id is null then
+      msg := msg || 'There''s no next game scheduled yet, so no spot could be saved.';
+    elsif exists (select 1 from registrations where game_id = ng.id and user_id = w.user_id
+                   and status in ('holding','confirmed','waitlisted','offered')) then
+      msg := msg || 'You''re already on the list for ' || fmt_day(ng.kickoff_at) || '.';
+    elsif w.blocked or not is_member(w.user_id, ng.category_id) then
+      msg := msg || 'Contact the organizer about your spot for the next game.';
+    elsif active_count(ng.id) >= ng.max_players then
+      msg := msg || 'The next game (' || fmt_day(ng.kickoff_at) || ') is already full, so you''ll need to join the waitlist.';
+    else
+      r := reserve_spot(ng, w.user_id, 'motm');
+      update motm_winners set reserved_game_id = ng.id where game_id = g.id and user_id = w.user_id;
+      msg := msg || 'Your spot for ' || fmt_day(ng.kickoff_at) || ' at ' || fmt_time(ng.kickoff_at) ||
+             ' is saved. Open the app and pay ' || fmt_money(ng.price_cents) || ' by ' ||
+             fmt_day(r.offer_expires_at) || ' at ' || fmt_time(r.offer_expires_at) || ' to keep it.';
+    end if;
+    perform notify(w.user_id, 'motm_won', '🏆 You''re Man of the Match!', msg);
+  end loop;
+
+  -- Everyone else who played, plus organizers, hears who won.
+  insert into outbox (user_id, kind, title, body)
+  select pr.id, 'motm_result', '🏆 Man of the Match: ' || names,
+         names || ' won Man of the Match for ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || '. See all winners in the app.'
+    from profiles pr
+   where pr.id not in (select user_id from motm_winners where game_id = g.id)
+     and (pr.is_admin or played(g.id, pr.id));
+  return jsonb_build_object('game', g.id, 'motm', names);
+end $$;
+
+-- Opens voting after games finish, reminds people who haven't voted, and closes voting on time.
+create or replace function public.tick_motm() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare g games; c categories; n int; out jsonb := '[]'::jsonb;
+begin
+  for g in select * from games
+            where motm_state is null and not is_test and cancelled_at is null
+              and ends_at <= now() and ends_at > now() - interval '3 days'
+            order by kickoff_at for update loop
+    select * into c from categories where id = g.category_id;
+    select count(*) into n from registrations where game_id = g.id and status = 'confirmed';
+    if not c.motm_enabled or n < 2 then
+      update games set motm_state = 'skipped' where id = g.id;
+      continue;
+    end if;
+    update games set motm_state = 'open',
+                     motm_closes_at = next_weekday_time(g.ends_at, c.motm_close_dow, c.motm_close_time)
+     where id = g.id returning * into g;
+    insert into outbox (user_id, kind, title, body)
+    select x.user_id, 'motm_vote', 'Vote for Man of the Match ⭐',
+           'Thanks for playing ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) ||
+           '! Open the app to vote for your Man of the Match by ' || fmt_day(g.motm_closes_at) || ' at ' ||
+           fmt_time(g.motm_closes_at) || '. The winner gets a spot saved in the next game.'
+      from registrations x where x.game_id = g.id and x.status = 'confirmed';
+    out := out || jsonb_build_array(jsonb_build_object('game', g.id, 'motm', 'voting opened'));
+  end loop;
+
+  -- Reminder a day before voting closes (at least 12 hours after the game) to those who haven't voted.
+  for g in select * from games
+            where motm_state = 'open' and not motm_reminded and now() < motm_closes_at
+              and now() >= motm_closes_at - interval '24 hours' and now() >= ends_at + interval '12 hours'
+            for update loop
+    insert into outbox (user_id, kind, title, body)
+    select x.user_id, 'motm_reminder', 'Last call: vote for Man of the Match ⭐',
+           'Voting for ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || ' closes ' ||
+           fmt_day(g.motm_closes_at) || ' at ' || fmt_time(g.motm_closes_at) || '. Open the app to cast your vote.'
+      from registrations x
+     where x.game_id = g.id and x.status = 'confirmed'
+       and not exists (select 1 from motm_votes v where v.game_id = g.id and v.voter_id = x.user_id);
+    update games set motm_reminded = true where id = g.id;
+  end loop;
+
+  for g in select * from games where motm_state = 'open' and now() >= motm_closes_at order by kickoff_at loop
+    out := out || jsonb_build_array(motm_close(g.id));
+  end loop;
+  return out;
+end $$;
+
+-- A player who played casts (or changes) their vote.
+create or replace function public.motm_vote(p_game bigint, p_candidate uuid) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare p profiles := me(); g games;
+begin
+  select * into g from games where id = p_game;
+  if not found or g.motm_state is distinct from 'open' or now() >= g.motm_closes_at then
+    raise exception 'Voting for this game is closed.';
+  end if;
+  if not played(g.id, p.id) then raise exception 'Only players who played this game can vote.'; end if;
+  if p_candidate = p.id then raise exception 'You can''t vote for yourself.'; end if;
+  if not played(g.id, p_candidate) then raise exception 'You can only vote for someone who played.'; end if;
+  insert into motm_votes (game_id, voter_id, candidate_id) values (g.id, p.id, p_candidate)
+  on conflict (game_id, voter_id) do update set candidate_id = excluded.candidate_id, created_at = now();
+  return jsonb_build_object('ok', true, 'name', (select full_name from profiles where id = p_candidate));
+end $$;
+
+-- Open ballots for the signed-in player.
+create or replace function public.motm_ballots(p_user uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'game_id', g.id, 'category', cat_name(g.category_id),
+           'badge', (select badge from categories where id = g.category_id),
+           'kickoff_at', g.kickoff_at, 'closes_at', g.motm_closes_at,
+           'my_vote', (select candidate_id from motm_votes v where v.game_id = g.id and v.voter_id = p_user),
+           'candidates', (select coalesce(jsonb_agg(jsonb_build_object('id', pr.id, 'name', coalesce(pr.full_name, 'Player'),
+                                                                       'badges', badges_of(pr.id)) order by pr.full_name), '[]'::jsonb)
+                            from registrations x join profiles pr on pr.id = x.user_id
+                           where x.game_id = g.id and x.status = 'confirmed' and x.user_id <> p_user))
+         order by g.kickoff_at), '[]'::jsonb)
+    from games g
+   where g.motm_state = 'open' and now() < g.motm_closes_at and played(g.id, p_user) $$;
+
+-- Most recent Man of the Match result in a category.
+create or replace function public.last_motm(p_category text, p_user uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select jsonb_build_object('game_id', g.id, 'kickoff_at', g.kickoff_at,
+           'winners', (select jsonb_agg(jsonb_build_object('name', coalesce(pr.full_name, 'Player'), 'votes', mw.votes,
+                                                           'me', pr.id = p_user) order by pr.full_name)
+                         from motm_winners mw join profiles pr on pr.id = mw.user_id where mw.game_id = g.id))
+    from games g
+   where g.category_id = p_category and g.motm_state = 'closed'
+     and exists (select 1 from motm_winners mw where mw.game_id = g.id)
+   order by g.kickoff_at desc limit 1 $$;
+
+-- All past winners (for the categories the player belongs to) and a leaderboard.
+create or replace function public.motm_history() returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare p profiles := me(); cats text[];
+begin
+  select array_agg(id) into cats from categories c where is_member(p.id, c.id);
+  if cats is null then raise exception 'Only members can see Man of the Match results.'; end if;
+  return jsonb_build_object(
+    'results', coalesce((select jsonb_agg(jsonb_build_object(
+                  'game_id', g.id, 'category', cat_name(g.category_id),
+                  'badge', (select badge from categories where id = g.category_id), 'kickoff_at', g.kickoff_at,
+                  'total_votes', (select count(*) from motm_votes v where v.game_id = g.id),
+                  'winners', coalesce((select jsonb_agg(jsonb_build_object('name', coalesce(pr.full_name, 'Player'), 'votes', mw.votes,
+                                                                           'me', pr.id = p.id) order by pr.full_name)
+                                         from motm_winners mw join profiles pr on pr.id = mw.user_id where mw.game_id = g.id), '[]'::jsonb))
+                order by g.kickoff_at desc)
+                from games g where g.motm_state = 'closed' and g.category_id = any(cats)), '[]'::jsonb),
+    'leaders', coalesce((select jsonb_agg(jsonb_build_object('name', t.name, 'wins', t.wins, 'me', t.id = p.id, 'badges', badges_of(t.id))
+                                          order by t.wins desc, t.name)
+                from (select pr.id, coalesce(pr.full_name, 'Player') as name, count(*) as wins
+                        from motm_winners mw join profiles pr on pr.id = mw.user_id join games g on g.id = mw.game_id
+                       where g.category_id = any(cats) group by pr.id, pr.full_name) t), '[]'::jsonb),
+    'open', (select coalesce(jsonb_agg(jsonb_build_object('category', cat_name(g.category_id), 'kickoff_at', g.kickoff_at,
+                                                          'closes_at', g.motm_closes_at) order by g.kickoff_at), '[]'::jsonb)
+               from games g where g.motm_state = 'open' and g.category_id = any(cats)));
+end $$;
+
 create or replace function public.tick_db() returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare gid bigint; out jsonb := '[]'::jsonb;
@@ -891,7 +1174,7 @@ begin
               order by kickoff_at loop
     out := out || jsonb_build_array(tick_game(gid));
   end loop;
-  return out;
+  return out || tick_motm();
 end $$;
 
 -- Work for the server to do with Stripe.
@@ -1043,14 +1326,23 @@ begin
         'user_id', pr.id, 'blocked', pr.blocked, 'badges', badges_of(pr.id), 'pay_state', r.pay_state, 'amount_cents', r.amount_cents,
         'sort_at', r.sort_at, 'created_at', r.created_at, 'paid_at', r.paid_at, 'is_manual', r.is_manual,
         'hold_expires_at', r.hold_expires_at, 'offer_expires_at', r.offer_expires_at,
-        'late_drop_refund', r.late_drop_refund) order by r.sort_at, r.id)
+        'late_drop_refund', r.late_drop_refund, 'reserved_by', r.reserved_by) order by r.sort_at, r.id)
       from registrations r join profiles pr on pr.id = r.user_id where r.game_id = g.id), '[]'::jsonb),
     'collected_cents', coalesce((select sum(case when kind in ('charged','captured') then amount_cents
                                                 when kind = 'refunded' then -amount_cents else 0 end)
                                    from payment_events where game_id = g.id), 0),
     'on_hold_cents', coalesce((select sum(amount_cents) from registrations
                                 where game_id = g.id and pay_state = 'authorized'), 0),
-    'failed_tasks', (select count(*) from stripe_tasks where status = 'failed'));
+    'failed_tasks', (select count(*) from stripe_tasks where status = 'failed'),
+    -- Man of the Match: full vote count (organizers only).
+    'motm', jsonb_build_object('state', g.motm_state, 'closes_at', g.motm_closes_at,
+              'voters', (select count(*) from motm_votes where game_id = g.id),
+              'players', (select count(*) from registrations where game_id = g.id and status = 'confirmed'),
+              'tally', coalesce((select jsonb_agg(jsonb_build_object('name', coalesce(pr.full_name, 'Player'), 'votes', t.n,
+                                   'winner', exists (select 1 from motm_winners mw where mw.game_id = g.id and mw.user_id = t.candidate_id))
+                                   order by t.n desc, pr.full_name)
+                                  from (select candidate_id, count(*) n from motm_votes where game_id = g.id group by candidate_id) t
+                                  join profiles pr on pr.id = t.candidate_id), '[]'::jsonb)));
 end $$;
 
 -- Add one game, or a game every week between two dates.
@@ -1148,7 +1440,7 @@ end $$;
 
 create or replace function public.admin_add(p_game bigint, p_user uuid) returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare a profiles := require_admin(); g games; p profiles;
+declare a profiles := require_admin(); g games; p profiles; r registrations;
 begin
   select * into g from games where id = p_game for update;
   if not found then raise exception 'That game doesn''t exist anymore.'; end if;
@@ -1162,14 +1454,15 @@ begin
   if active_count(g.id) >= g.max_players then
     raise exception 'The game is full (% players). Remove someone or raise the player limit first.', g.max_players;
   end if;
-  insert into registrations (game_id, user_id, status, pay_state, is_manual, amount_cents, paid_at)
-  values (g.id, p_user, 'confirmed', 'manual', true, 0, now());
-  if p_user <> a.id then
-    perform notify(p_user, 'added', 'You''re in! ✓',
-      'The organizer added you to ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || ' at ' ||
-      fmt_time(g.kickoff_at) || ' (' || g.location || ').');
-  end if;
-  return jsonb_build_object('ok', true);
+  if game_phase(g) = 'done' then raise exception 'This game is already over.'; end if;
+  -- The spot is set aside, but the player still pays for it (in the app) by the deadline.
+  r := reserve_spot(g, p_user, 'organizer');
+  perform notify(p_user, 'reserved', 'A spot is saved for you — please pay ⚽',
+    'The organizer saved you a spot in ' || cat_name(g.category_id) || ' on ' || fmt_day(g.kickoff_at) || ' at ' ||
+    fmt_time(g.kickoff_at) || ' (' || g.location || '). Open the app and pay ' || fmt_money(g.price_cents) ||
+    ' by ' || fmt_day(r.offer_expires_at) || ' at ' || fmt_time(r.offer_expires_at) ||
+    ' to confirm it, or it goes to the next person.');
+  return jsonb_build_object('ok', true, 'pay_by', r.offer_expires_at);
 end $$;
 
 create or replace function public.admin_move(p_reg bigint, p_direction text) returns jsonb
@@ -1277,7 +1570,10 @@ begin
     opens_time           = coalesce((p->>'opens_time')::time, opens_time),
     close_minutes_before = coalesce((p->>'close_minutes_before')::int, close_minutes_before),
     drop_deadline_dow    = coalesce((p->>'drop_deadline_dow')::int, drop_deadline_dow),
-    drop_deadline_time   = coalesce((p->>'drop_deadline_time')::time, drop_deadline_time)
+    drop_deadline_time   = coalesce((p->>'drop_deadline_time')::time, drop_deadline_time),
+    motm_enabled         = coalesce((p->>'motm_enabled')::boolean, motm_enabled),
+    motm_close_dow       = coalesce((p->>'motm_close_dow')::int, motm_close_dow),
+    motm_close_time      = coalesce((p->>'motm_close_time')::time, motm_close_time)
   where id = p_category;
   if not found then raise exception 'Unknown game group.'; end if;
   return jsonb_build_object('ok', true);
@@ -1388,3 +1684,5 @@ grant execute on function public.admin_block(uuid, boolean)                   to
 grant execute on function public.admin_set_organizer(uuid, boolean)           to authenticated;
 grant execute on function public.admin_games()                                to authenticated;
 grant execute on function public.admin_payments()                             to authenticated;
+grant execute on function public.motm_vote(bigint, uuid)                      to authenticated;
+grant execute on function public.motm_history()                               to authenticated;

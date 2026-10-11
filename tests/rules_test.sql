@@ -139,6 +139,53 @@ select pg_temp.at('2026-10-16 09:00 America/Chicago'); select tick_db();
 select pg_temp.check((select count(*) = 18 from outbox where kind = 'game_reminder'), 'game-day reminder to all 18');
 select pg_temp.at('2026-10-16 20:00 America/Chicago'); select tick_db();
 select pg_temp.check((claim_spot(pg_temp.u(5), pg_temp.fri('2026-10-16'))->>'error') = 'Sign-ups are closed for this game.', 'no sign-ups after close');
+
+-- 11b. Man of the Match: voting opens after the game, players who played vote until Monday 10 AM
+select pg_temp.at('2026-10-16 23:31 America/Chicago'); select tick_db();
+select pg_temp.check((select motm_state = 'open' and motm_closes_at = '2026-10-19 10:00 America/Chicago'
+                      from games where id = pg_temp.fri('2026-10-16')), 'MOTM voting opens after the game, closes Monday 10 AM');
+select pg_temp.check((select count(*) = 18 from outbox where kind = 'motm_vote'), 'all 18 players asked to vote');
+select pg_temp.as_user(3);
+do $$ begin perform motm_vote(pg_temp.fri('2026-10-16'), pg_temp.u(2)); raise exception 'FAILED: non-player voted';
+exception when others then if sqlerrm like 'FAILED%' then raise; end if; raise notice 'ok - only players who played can vote'; end $$;
+select pg_temp.as_user(5);
+do $$ begin perform motm_vote(pg_temp.fri('2026-10-16'), pg_temp.u(5)); raise exception 'FAILED: self vote';
+exception when others then if sqlerrm like 'FAILED%' then raise; end if; raise notice 'ok - no voting for yourself'; end $$;
+do $$ begin perform motm_vote(pg_temp.fri('2026-10-16'), pg_temp.u(22)); raise exception 'FAILED: voted for non-player';
+exception when others then if sqlerrm like 'FAILED%' then raise; end if; raise notice 'ok - can only vote for someone who played'; end $$;
+select pg_temp.as_user(i), motm_vote(pg_temp.fri('2026-10-16'), pg_temp.u(2)) from generate_series(5, 7) i;
+select pg_temp.as_user(i), motm_vote(pg_temp.fri('2026-10-16'), pg_temp.u(10)) from generate_series(8, 9) i;
+select pg_temp.as_user(10); select motm_vote(pg_temp.fri('2026-10-16'), pg_temp.u(2)); select motm_vote(pg_temp.fri('2026-10-16'), pg_temp.u(11));
+select pg_temp.check((select count(*) = 6 from motm_votes), 'one vote per player (changing a vote replaces it)');
+select pg_temp.as_user(5);
+select pg_temp.check(jsonb_array_length(get_home()->'motm_ballots') = 1
+                     and jsonb_array_length(get_home()->'motm_ballots'->0->'candidates') = 17
+                     and (get_home()->'motm_ballots'->0->>'my_vote')::uuid = pg_temp.u(2), 'ballot shows the other 17 players and my vote');
+select pg_temp.as_user(3);
+select pg_temp.check(jsonb_array_length(get_home()->'motm_ballots') = 0, 'non-players get no ballot');
+select pg_temp.at('2026-10-18 10:30 America/Chicago'); select tick_db();
+select pg_temp.check((select count(*) = 12 from outbox where kind = 'motm_reminder'), 'reminder a day before to the 12 who haven''t voted');
+select pg_temp.at('2026-10-19 10:00 America/Chicago'); select tick_db();
+select pg_temp.check((select motm_state = 'closed' from games where id = pg_temp.fri('2026-10-16')), 'voting closes Monday 10 AM');
+select pg_temp.check((select user_id = pg_temp.u(2) and votes = 3 from motm_winners), 'Player 2 is Man of the Match with 3 votes');
+select pg_temp.check((select count(*) = 1 from outbox where kind = 'motm_won' and user_id = pg_temp.u(2)), 'winner told');
+select pg_temp.check((select count(*) = 18 from outbox where kind = 'motm_result'), 'other players + organizer told who won');
+select pg_temp.check(badges_of(pg_temp.u(2)) = '["FRI", "MOTM"]'::jsonb, 'winner gets the MOTM badge');
+select pg_temp.check((pg_temp.reg(2)).game_id = pg_temp.fri('2026-10-23') and (pg_temp.reg(2)).status = 'offered'
+                     and (pg_temp.reg(2)).reserved_by = 'motm' and (pg_temp.reg(2)).pay_state = 'none',
+                     'winner has a spot saved in next Friday''s game (not paid yet)');
+select pg_temp.check((pg_temp.reg(2)).offer_expires_at = '2026-10-19 16:00 America/Chicago', 'winner must pay within 2 hours of sign-ups opening');
+select pg_temp.check((claim_spot(pg_temp.u(2), pg_temp.fri('2026-10-23'))->>'action') = 'pay', 'winner can pay before sign-ups open');
+select pg_temp.as_user(5);
+do $$ begin perform motm_vote(pg_temp.fri('2026-10-16'), pg_temp.u(2)); raise exception 'FAILED: voted after close';
+exception when others then if sqlerrm like 'FAILED%' then raise; end if; raise notice 'ok - no votes after Monday 10 AM'; end $$;
+select pg_temp.check(jsonb_array_length(motm_history()->'results') = 1 and (motm_history()->'leaders'->0->>'name') = 'Player 2'
+                     and (motm_history()->'leaders'->0->>'wins')::int = 1, 'MOTM history and leaderboard');
+select pg_temp.check((get_home()->'sections'->0->'last_motm'->'winners'->0->>'name') = 'Player 2', 'home shows last Man of the Match');
+select pg_temp.as_user(2);
+select pg_temp.check((get_home()->'sections'->0->'view'->'my'->>'reserved_by') = 'motm', 'winner sees their saved spot');
+select pg_temp.as_user(23);
+do $$ begin perform motm_history(); exception when others then raise exception 'FAILED: member could not see history'; end $$;
 select pg_temp.at('2026-10-17 00:00 America/Chicago');
 select pg_temp.as_user(2);
 select pg_temp.check((get_home()->'sections'->0->'view'->'game'->>'id')::bigint = pg_temp.fri('2026-10-23'), 'after the game, home shows next Friday');
@@ -147,8 +194,23 @@ select pg_temp.check((select opened_notified from games where id = pg_temp.fri('
 
 -- 12. Organizer tools
 select pg_temp.as_user(1);
+select attach_checkout((pg_temp.reg(2)).id, 'cs_2motm', 'u'); select payment_completed('cs_2motm', null, 'pi_2motm', 805, false);
+select pg_temp.check((pg_temp.reg(2)).status = 'confirmed', 'MOTM winner confirmed once they pay');
 select admin_add(pg_temp.fri('2026-10-23'), pg_temp.u(1));
-select pg_temp.check((pg_temp.reg(1)).pay_state = 'manual', 'organizer adds himself, no charge');
+select pg_temp.check((pg_temp.reg(1)).status = 'offered' and (pg_temp.reg(1)).reserved_by = 'organizer' and (pg_temp.reg(1)).pay_state = 'none',
+                     'organizer add saves a spot that still has to be paid');
+select pg_temp.check((select count(*) = 1 from outbox where kind = 'reserved' and user_id = pg_temp.u(1)), 'added player told to pay');
+select pg_temp.check((claim_spot(pg_temp.u(1), pg_temp.fri('2026-10-23'))->>'action') = 'pay', 'added player pays like everyone else');
+select attach_checkout((pg_temp.reg(1)).id, 'cs_1', 'u'); select payment_completed('cs_1', null, 'pi_1', 805, false);
+select pg_temp.check((pg_temp.reg(1)).status = 'confirmed' and (pg_temp.reg(1)).pay_state = 'authorized', 'added player confirmed after paying');
+select admin_add(pg_temp.fri('2026-10-23'), pg_temp.u(11));
+select pg_temp.as_user(12);
+select pg_temp.check(jsonb_array_length(get_home()->'sections'->0->'view'->'reserved') = 1
+                     and jsonb_array_length(get_home()->'sections'->0->'view'->'waitlist') = 0, 'saved spots show as reserved, not waitlist');
+select pg_temp.at('2026-10-19 16:01 America/Chicago'); select tick_db();
+select pg_temp.check((pg_temp.reg(11)).status = 'expired', 'unpaid saved spot is released');
+select pg_temp.check((select count(*) = 1 from outbox where kind = 'admin_reserved_expired'), 'organizer told the saved spot wasn''t paid');
+select pg_temp.as_user(1);
 select claim_spot(pg_temp.u(6), pg_temp.fri('2026-10-23')); select attach_checkout((pg_temp.reg(6)).id, 'cs_6b', 'u');
 select payment_completed('cs_6b', null, 'pi_6b', 805, false);
 select admin_remove((pg_temp.reg(6)).id, true);

@@ -16,7 +16,10 @@ const timeOf = (iso) => fmt(iso, { hour: 'numeric', minute: '2-digit' });
 const dayOf = (iso) => fmt(iso, { weekday: 'short', month: 'short', day: 'numeric' });
 const longDay = (iso) => fmt(iso, { weekday: 'long', month: 'long', day: 'numeric' });
 const whenOf = (iso) => `${fmt(iso, { weekday: 'short' })} ${timeOf(iso)}`;
-const badgeHtml = (badges) => (badges || []).map((b) => `<span class="badge b-${esc(String(b).toLowerCase())}">${esc(b)}</span>`).join('');
+const whenDay = (iso) => `${timeOf(iso)} ${dayOf(iso)}`; // 10:00 AM Mon, Oct 19
+const badgeHtml = (badges) => (badges || []).map((b) => String(b).startsWith('MOTM')
+  ? `<span class="badge b-motm" title="Man of the Match">🏆 ${esc(String(b).replace(' x', ' ×'))}</span>`
+  : `<span class="badge b-${esc(String(b).toLowerCase())}">${esc(b)}</span>`).join('');
 function store(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch {} }
 function stored(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
 
@@ -125,6 +128,7 @@ async function route() {
     if (h.startsWith('/admin') && me.is_admin) { const [, , tab, id] = h.split('/'); return renderAdmin(tab || 'games', id); }
     if (h === '/profile') return renderProfile(false);
     if (h === '/history') return renderHistory();
+    if (h === '/motm') return renderMotm();
     if (!S.home.sections.length) return renderPending();
     return renderHome();
   } catch (e) {
@@ -285,6 +289,15 @@ function actionHtml(v, me) {
       <div class="sub">Your spot is held for <b class="countdown" data-until="${active.hold_expires_at}">${remaining(active.hold_expires_at)}</b></div>
       ${link('drop', 'Release my spot')}`;
   }
+  if (active && active.status === 'offered' && active.reserved_by) {
+    const why = active.reserved_by === 'motm' ? '🏆 Your MOTM spot' : 'Spot saved for you';
+    const live = g.phase === 'open' && !inQuietNow();
+    return `<div class="status reserved">${why}<small>${active.reserved_by === 'motm' ? 'You won Man of the Match — pay to confirm' : 'The organizer saved it — pay to confirm'}</small></div>
+      ${btn('pay', `Pay ${price} to confirm`)}
+      <div class="sub">${live ? `Pay within <b class="countdown" data-until="${active.offer_expires_at}">${remaining(active.offer_expires_at)}</b>`
+        : `Pay by <b>${esc(whenDay(active.offer_expires_at))}</b>`} or it goes to the next person.</div>
+      ${link('drop', 'I can\'t make it — release my spot')}`;
+  }
   if (active && active.status === 'offered') {
     return `${btn('pay', `Spot available — pay ${price}`)}
       <div class="sub">${inQuietNow() ? `Pay by <b>${whenOf(active.offer_expires_at)}</b> (clock paused overnight)`
@@ -308,7 +321,10 @@ const viewsOf = (sec) => sec.views || (sec.view ? [sec.view] : []);
 
 function sectionHtml(sec, me) {
   const views = viewsOf(sec);
-  const head = `<h2 class="section-title">${esc(sec.category)} ${badgeHtml([sec.badge])}</h2>`;
+  const lm = sec.last_motm;
+  const head = `<h2 class="section-title">${esc(sec.category)} ${badgeHtml([sec.badge])}</h2>` +
+    (lm && lm.winners ? `<a class="motm-line" href="#/motm"><span class="ico">🏆</span><span class="txt"><small>Man of the Match · ${esc(dayOf(lm.kickoff_at))}</small>
+      <b>${lm.winners.map((w) => esc(w.name) + (w.me ? ' (you!)' : '')).join(' & ')}</b></span><span class="chev">›</span></a>` : '');
   if (!views.length) {
     return `${head}<section class="card center muted">No ${esc(sec.category)} are scheduled yet. You'll get an email when sign-ups open.</section>`;
   }
@@ -338,6 +354,9 @@ function gameBlockHtml(v, me) {
       <h2>Playing (${v.confirmed.length})</h2>
       ${v.confirmed.length ? `<ol class="names">${names(v.confirmed, () => '')}</ol>`
         : `<p class="muted">No one yet${g.phase === 'open' ? ' — be the first!' : '.'}</p>`}
+      ${(v.reserved || []).length ? `<p class="muted small" style="margin-bottom:4px">Spots saved (waiting for payment):</p>
+        <ul class="names reserved">${v.reserved.map((p) => `<li class="${p.me ? 'me' : ''}"><span class="nm">${esc(p.name)}</span>${badgeHtml(p.badges)}
+          <span class="tag warn">${p.reason === 'motm' ? '🏆 MOTM spot' : 'Saved'}</span>${p.me ? ' <span class="tag">You</span>' : ''}</li>`).join('')}</ul>` : ''}
       ${v.paying_count ? `<p class="muted small">+ ${v.paying_count} paying right now</p>` : ''}
     </section>
     ${v.waitlist.length ? `<section class="card"><h2>Waitlist (${v.waitlist.length})</h2>
@@ -367,6 +386,7 @@ function renderHome() {
     ${banner}${adminNote}
     <div class="me-line">${esc(h.me.full_name)} ${badgeHtml(h.me.badges)}</div>
     ${pendingOther.length ? `<div class="notice info small">Waiting for approval: ${pendingOther.map((m) => esc(m.category)).join(', ')}</div>` : ''}
+    ${(h.motm_ballots || []).map(ballotHtml).join('')}
     ${h.sections.map((s) => sectionHtml(s, h.me)).join('')}
     ${pushCard()}
     <section class="card small muted">
@@ -374,9 +394,17 @@ function renderHome() {
       First come, first served. Drop before the deadline (shown on your spot) for a full refund; after that you're only refunded if someone takes your spot.
       If the game is full, join the waitlist for free and we'll notify you if a spot opens.
     </section>
-    <nav class="foot"><a href="#/history">My games & payments</a><a href="#/profile">Profile</a>${h.me.is_admin ? '<a href="#/admin">Organizer</a>' : ''}</nav>`;
+    <nav class="foot"><a href="#/history">My games & payments</a><a href="#/motm">🏆 MOTM</a><a href="#/profile">Profile</a>${h.me.is_admin ? '<a href="#/admin">Organizer</a>' : ''}</nav>`;
 
   app.querySelectorAll('[data-act]').forEach((b) => { b.onclick = () => handleAction(b.dataset.act, Number(b.dataset.game), b); });
+  app.querySelectorAll('[data-vote]').forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try { const r = await rpc('motm_vote', { p_game: Number(b.dataset.vote), p_candidate: b.dataset.who }); toast(`Vote saved for ${r.name} ✓`); }
+      catch (e) { toast(e.message, 5000); }
+      await loadHome();
+    };
+  });
   const pushBtn = document.getElementById('push-on');
   if (pushBtn) pushBtn.onclick = enablePush;
   const pushNo = document.getElementById('push-no');
@@ -413,6 +441,7 @@ async function handleAction(act, gameId, btn) {
     let title = 'Drop out?', text = '', yes = 'Yes, drop me';
     if (my.status === 'holding') { title = 'Release your spot?'; text = 'Someone else will be able to take it.'; yes = 'Release it'; }
     else if (my.status === 'waitlisted') { title = 'Leave the waitlist?'; text = 'You\'ll lose your place in line.'; yes = 'Leave waitlist'; }
+    else if (my.status === 'offered' && my.reserved_by) { title = 'Release your saved spot?'; text = 'It will go to the next person.'; yes = 'Release it'; }
     else if (my.status === 'offered') { title = 'Turn down this spot?'; text = 'It will be offered to the next person.'; yes = 'Give it away'; }
     else if (my.is_manual) text = 'Your spot will go to the next person.';
     else if (new Date() < new Date(g.drop_deadline_at)) text = `You'll get your ${money(g.price_cents)} back automatically.`;
@@ -423,6 +452,42 @@ async function handleAction(act, gameId, btn) {
     try { const r = await rpc('drop_out', { p_game: gameId }); kick(); toast(r.message, 6000); } catch (e) { toast(e.message); }
     await loadHome();
   }
+}
+
+// ---------- Man of the Match ----------
+function ballotHtml(b) {
+  const voted = b.candidates.find((c) => c.id === b.my_vote);
+  return `<section class="card ballot">
+    <div class="kicker">⭐ Vote · Man of the Match</div>
+    <h2>${esc(b.category)} · ${esc(dayOf(b.kickoff_at))}</h2>
+    <p class="muted small" style="margin:0 0 10px">${voted ? `You voted for <b>${esc(voted.name)}</b>. You can change it until`
+      : 'Who was the best player? Voting closes'} ${esc(whenDay(b.closes_at))}. The winner gets a spot saved in the next game.</p>
+    <div class="vote-list">${b.candidates.map((c) => `<button class="vote ${c.id === b.my_vote ? 'on' : ''}" data-vote="${b.game_id}" data-who="${c.id}">
+      <span>${esc(c.name)} ${badgeHtml(c.badges)}</span>${c.id === b.my_vote ? '<span class="tick">✓</span>' : ''}</button>`).join('')}</div>
+  </section>`;
+}
+
+async function renderMotm() {
+  const back = topBar('<a class="iconbtn" href="#/">Back</a>');
+  app.innerHTML = `${back}<div class="loading"><div class="spinner"></div></div>`;
+  let d;
+  try { d = await rpc('motm_history'); } catch (e) { app.innerHTML = `${back}<section class="card">${esc(e.message)}</section>`; return; }
+  const medal = (i) => ['🥇', '🥈', '🥉'][i] || `${i + 1}.`;
+  app.innerHTML = `${back}
+    <h2 class="section-title">🏆 Man of the Match</h2>
+    ${d.open.map((o) => `<div class="notice info small">Voting open for ${esc(o.category)} on ${esc(dayOf(o.kickoff_at))} until ${esc(whenDay(o.closes_at))}.</div>`).join('')}
+    <section class="card"><h2>Most wins</h2>
+      ${d.leaders.length ? `<ol class="leaders">${d.leaders.map((l, i) => `<li class="${l.me ? 'me' : ''}"><span class="pos">${medal(i)}</span>
+        <span class="nm">${esc(l.name)}${l.me ? ' <span class="tag">You</span>' : ''}</span><b>${l.wins}</b></li>`).join('')}</ol>`
+        : '<p class="muted">No winners yet. After each game, the players vote and the winner shows up here.</p>'}
+    </section>
+    <section class="card"><h2>Past winners</h2>
+      ${d.results.length ? d.results.map((r) => `<div class="row-item"><div class="who"><b>${esc(dayOf(r.kickoff_at))} ${badgeHtml([r.badge])}</b>
+        <span>${r.winners.length ? r.winners.map((w) => `${esc(w.name)}${w.me ? ' (you)' : ''} · ${w.votes} vote${w.votes === 1 ? '' : 's'}`).join(' & ') : 'No votes'}</span></div>
+        ${r.winners.length ? '<span class="trophy">🏆</span>' : ''}</div>`).join('')
+        : '<p class="muted">Nothing yet.</p>'}
+      <p class="muted small">Only players who played a game can vote, and not for themselves. Voting closes the Monday after at 10 AM; ties share the award.</p>
+    </section>`;
 }
 
 // ---------- push notifications ----------
@@ -495,7 +560,7 @@ const payTag = (r) => ({
   refund_pending: '<span class="tag warn">Refunding</span>', refunded: '<span class="tag grey">Refunded</span>',
   released: '<span class="tag grey">Released</span>', none: '',
 }[r.pay_state] || '');
-const phaseText = (g) => (g.is_test && g.phase === 'open') ? 'Test game · open until you close it' : ({ upcoming: `Opens ${whenOf(g.opens_at)}, ${dayOf(g.opens_at)}`, open: `Open until ${whenOf(g.closes_at)}`, closed: 'Sign-ups closed', done: 'Finished', cancelled: 'Cancelled' }[g.phase]);
+const phaseText = (g) => (g.is_test && g.phase === 'open') ? 'Test game · open until you close it' : ({ upcoming: `Opens ${whenDay(g.opens_at)}`, open: `Open until ${whenOf(g.closes_at)}`, closed: 'Sign-ups closed', done: 'Finished', cancelled: 'Cancelled' }[g.phase]);
 
 async function renderAdmin(tab, id) {
   const pend = S.home.pending_requests;
@@ -551,12 +616,13 @@ async function adminGames(shell) {
 async function adminGame(shell, gameId) {
   const b = await rpc('admin_board', { p_game: gameId });
   const g = b.game, regs = b.registrations;
-  const playing = regs.filter((r) => ['confirmed', 'holding'].includes(r.status));
-  const waiting = regs.filter((r) => ['waitlisted', 'offered'].includes(r.status));
+  const playing = regs.filter((r) => ['confirmed', 'holding'].includes(r.status) || (r.status === 'offered' && r.reserved_by));
+  const waiting = regs.filter((r) => ['waitlisted', 'offered'].includes(r.status) && !r.reserved_by);
+  const m = b.motm || {};
   const gone = regs.filter((r) => !['confirmed', 'holding', 'waitlisted', 'offered'].includes(r.status));
   const row = (r, i, movable) => `<div class="row-item">
-      <div class="who"><b>${i + 1}. ${esc(r.name || r.email)} ${badgeHtml(r.badges)}</b><span>${esc(r.email)}${r.phone ? ' · ' + esc(r.phone) : ''}</span></div>
-      ${r.status === 'holding' ? '<span class="tag warn">Paying…</span>' : r.status === 'offered' ? '<span class="tag warn">Offered</span>' : payTag(r)}
+      <div class="who"><b>${i + 1}. ${esc(r.name || r.email)} ${badgeHtml(r.badges)}</b><span>${r.status === 'offered' && r.reserved_by ? `Unpaid · due ${esc(whenOf(r.offer_expires_at))}` : esc(r.email) + (r.phone ? ' · ' + esc(r.phone) : '')}</span></div>
+      ${r.status === 'holding' ? '<span class="tag warn">Paying…</span>' : r.status === 'offered' && r.reserved_by ? `<span class="tag warn">${r.reserved_by === 'motm' ? '🏆 Saved' : 'Saved'}</span>` : r.status === 'offered' ? '<span class="tag warn">Offered</span>' : payTag(r)}
       ${movable ? `<button class="mini" data-move="up" data-id="${r.id}" aria-label="Move up">↑</button><button class="mini" data-move="down" data-id="${r.id}" aria-label="Move down">↓</button>` : ''}
       <button class="mini bad" data-remove="${r.id}" data-name="${esc(r.name || r.email)}" data-paid="${['authorized', 'captured'].includes(r.pay_state) ? 1 : 0}">✕</button>
     </div>`;
@@ -578,6 +644,10 @@ async function adminGame(shell, gameId) {
     </div>` : ''}
     <section class="card"><h2>Playing (${playing.length})</h2>${playing.map((r, i) => row(r, i, true)).join('') || '<p class="muted">No one yet.</p>'}</section>
     <section class="card"><h2>Waitlist (${waiting.length})</h2>${waiting.map((r, i) => row(r, i, true)).join('') || '<p class="muted">Empty.</p>'}</section>
+    ${m.state && m.state !== 'skipped' ? `<section class="card"><h2>🏆 Man of the Match</h2>
+      <p class="muted small" style="margin-top:0">${m.state === 'open' ? `Voting open until ${esc(whenDay(m.closes_at))}` : 'Voting closed'} · ${m.voters} of ${m.players} players voted</p>
+      ${m.tally.length ? m.tally.map((t) => `<div class="row-item"><div class="who"><b>${esc(t.name)}</b></div>${t.winner ? '<span class="tag">Winner</span>' : ''}<b>${t.votes}</b></div>`).join('') : '<p class="muted">No votes yet.</p>'}
+    </section>` : ''}
     ${gone.length ? `<section class="card"><details><summary>Dropped / removed (${gone.length})</summary>
       ${gone.map((r) => `<div class="row-item"><div class="who"><b>${esc(r.name || r.email)}</b><span>${esc(r.status)}${r.late_drop_refund ? ` · late drop, refund ${esc(r.late_drop_refund)}` : ''}</span></div>${payTag(r)}</div>`).join('')}
     </details></section>` : ''}
@@ -611,7 +681,7 @@ async function adminGame(shell, gameId) {
   });
   const addMe = document.getElementById('add-me');
   if (addMe) addMe.onclick = async () => {
-    try { await rpc('admin_add', { p_game: gameId, p_user: S.home.me.id }); toast('You\'re on the list'); S.home = null; adminGame(shell, gameId); } catch (e) { toast(e.message, 5000); }
+    try { await rpc('admin_add', { p_game: gameId, p_user: S.home.me.id }); toast('Spot saved — pay for it on your home screen', 5000); S.home = null; adminGame(shell, gameId); } catch (e) { toast(e.message, 5000); }
   };
   const addPlayer = document.getElementById('add-player');
   if (addPlayer) addPlayer.onclick = async () => {
@@ -619,10 +689,10 @@ async function adminGame(shell, gameId) {
     const onList = new Set(regs.filter((r) => ['confirmed', 'holding', 'waitlisted', 'offered'].includes(r.status)).map((r) => r.user_id));
     const options = m.people.filter((p) => !onList.has(p.id) && p.name && (p.is_admin || (p.memberships[g.category_id] || {}).status === 'approved'));
     if (!options.length) return toast(`Every approved ${g.category} member is already on the list`);
-    const pick = await modal({ title: 'Add a player', text: `Approved ${esc(g.category)} members. They're added for free (no card charge).`,
+    const pick = await modal({ title: 'Add a player', text: `Approved ${esc(g.category)} members. Their spot is saved and they get an email to pay ${money(g.price_cents)} (same pay-by window as a waitlist offer).`,
       buttons: [...options.slice(0, 40).map((p) => ({ label: p.name, cls: 'secondary', value: p.id })), { label: 'Cancel', cls: 'secondary', value: null }] });
     if (!pick) return;
-    try { await rpc('admin_add', { p_game: gameId, p_user: pick }); kick(); toast('Added'); adminGame(shell, gameId); } catch (e) { toast(e.message, 5000); }
+    try { await rpc('admin_add', { p_game: gameId, p_user: pick }); kick(); toast('Spot saved — they\'ve been told to pay', 5000); adminGame(shell, gameId); } catch (e) { toast(e.message, 5000); }
   };
   const eg = document.getElementById('eg');
   if (eg) eg.onsubmit = async (e) => {
@@ -754,7 +824,11 @@ async function adminSettings(shell) {
         <div><label>Drop deadline day</label>${daySel('drop_deadline_dow', c.drop_deadline_dow)}</div>
         <div><label>Deadline time</label><input name="drop_deadline_time" type="time" value="${t(c.drop_deadline_time)}"></div>
         <div><label>Close sign-ups (min before)</label><input name="close_minutes_before" type="number" value="${c.close_minutes_before}"></div>
+        <div></div>
+        <div><label>MOTM voting closes</label>${daySel('motm_close_dow', c.motm_close_dow)}</div>
+        <div><label>at</label><input name="motm_close_time" type="time" value="${t(c.motm_close_time)}"></div>
       </div>
+      <label class="check" style="margin-top:12px"><input type="checkbox" name="motm_enabled" value="true" ${c.motm_enabled ? 'checked' : ''}> Man of the Match voting after each game</label>
       <button class="btn secondary" style="margin-top:16px">Save ${esc(c.name)}</button></form>`).join('')}
     <form class="card" id="club"><h2>Club-wide</h2>
       <label>Club name</label><input name="club_name" type="text" value="${esc(s.club_name)}">
@@ -771,7 +845,7 @@ async function adminSettings(shell) {
     form.onsubmit = async (e) => {
       e.preventDefault();
       const f = Object.fromEntries(new FormData(form));
-      const p = { ...f, price_cents: Math.round(Number(f.price) * 100) };
+      const p = { ...f, price_cents: Math.round(Number(f.price) * 100), motm_enabled: !!f.motm_enabled };
       delete p.price;
       try { await rpc('admin_update_category', { p_category: form.dataset.cat, p }); toast('Saved'); } catch (err) { toast(err.message, 5000); }
     };

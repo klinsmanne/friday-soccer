@@ -201,3 +201,34 @@ ol.names li .nm { margin-right: 2px; }
 .notice.row { align-items: center; justify-content: space-between; gap: 10px; }
 .row-item .who .badge, .row-item .who .tag { display: inline-block; white-space: nowrap; }
 .row-item .who b .badge { margin-left: 4px; }
+
+/* Saved spots and Man of the Match */
+.status.reserved { background: rgba(200, 240, 60, .16); color: #fff; border: 1px solid rgba(200, 240, 60, .55); }
+ul.names.reserved { list-style: none; margin: 0 0 6px; padding: 0; }
+ul.names.reserved li { display: flex; align-items: center; gap: 10px; padding: 7px 0; flex-wrap: wrap; }
+ul.names.reserved li.me { font-weight: 700; }
+.badge.b-motm { background: #f5c542; color: #3a2a00; }
+.motm-line { display: flex; align-items: center; gap: 12px; margin: -4px 0 12px; padding: 10px 14px; border-radius: 14px;
+  background: var(--card); box-shadow: var(--shadow); color: var(--ink); text-decoration: none; }
+.motm-line .ico { font-size: 24px; }
+.motm-line .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.motm-line small { color: var(--muted); font-size: 12px; }
+.row-item .who .badge.b-fri { color: #c8f03c; }
+.row-item .who .badge.b-wed { color: #fff; }
+.row-item .who .badge.b-motm { color: #3a2a00; }
+.ballot { border: 2px solid #f5c542; }
+.ballot .kicker { font-family: var(--display); font-weight: 700; letter-spacing: .12em; font-size: 14px; color: var(--warn); text-transform: uppercase; }
+.ballot h2 { margin: 2px 0 6px; }
+.vote-list { display: grid; gap: 8px; }
+.vote { display: flex; justify-content: space-between; align-items: center; gap: 10px; width: 100%; padding: 12px 14px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit; font-weight: 600; text-align: left; cursor: pointer; }
+.vote.on { border-color: var(--pitch-2); background: var(--ok-bg); }
+.vote .tick { color: var(--ok); font-weight: 800; }
+.vote:disabled { opacity: .6; }
+ol.leaders { list-style: none; margin: 0; padding: 0; }
+ol.leaders li { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+ol.leaders li:first-child { border-top: 0; }
+ol.leaders li.me { font-weight: 700; }
+ol.leaders .pos { width: 28px; text-align: center; font-family: var(--display); font-weight: 700; color: var(--muted); }
+ol.leaders .nm { flex: 1; }
+.trophy { font-size: 20px; }

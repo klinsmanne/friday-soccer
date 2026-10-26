@@ -1,62 +1,56 @@
-# Midwest FC — members sign-up app
+# Midwest FC Sign-up App
 
-Website: **https://signup.midwestfc.workers.dev**
-Status check: https://signup.midwestfc.workers.dev/api/health — every line should say `ok` (never shows any keys).
+A members-only web app that runs a weekly 18-player pickup soccer game: sign-ups, payments, the waitlist,
+refunds and Man of the Match voting. It replaced a WhatsApp routine where players posted their names in the
+group chat and the organizer copied the list by hand and chased everyone for payment.
 
-## How it works (the rules)
-- **Members only.** New people sign in, enter their name, tick the waiver and pick the group(s) they want
-  (Friday Games and/or Wednesday Games). The organizer gets an email and approves or declines each request.
-  Until approved they only see a "request pending" screen. Badges (FRI / WED) show who is in which group.
-- **Friday Games:** every Friday, 10:00–11:30 PM CT at Ackerman Soccer. 18 spots, $8.05.
-  Games are scheduled Oct 16 – Dec 25, 2026 (add more any time: Organizer → Games → Add weekly games).
-- **Wednesday Games:** the group exists for memberships; no games yet.
-- Sign-ups open Monday 2:00 PM CT of game week and close 2 hours before kickoff. Approved members of that group get an email when they open.
-- "Sign up & pay" holds your spot for 10 minutes while you pay (card, Apple Pay, Google Pay).
-- Before Thursday 8 PM your card is only *held*; it's charged at Thursday 8 PM. Sign-ups after that are charged right away.
-- Drop before Thursday 8 PM → full refund (the hold is released). Drop after → refunded only if someone takes the spot.
-- When full, players join the waitlist for free. When a spot opens, the next person gets an email and 2 hours to pay
-  (30 minutes on game day). The clock pauses 10 PM–9 AM. If they don't pay, it goes to the next person.
-- Game-day reminder at 9 AM Friday.
-- **Man of the Match:** after each game, everyone who played gets a notification to vote (not for themselves) until
-  the next Monday 10 AM CT; a reminder goes out a day before. The winner (ties: all tied players) gets a 🏆 MOTM badge
-  and a spot saved in the next game, which they still have to pay for (within 2 hours of sign-ups opening, or it goes to
-  the waitlist). Past winners and a leaderboard: 🏆 MOTM link at the bottom of the app.
+- **Case study, with screenshots:** https://claude.ai/artifact/3tDJ1SNFc5f94nrxSLVDVT
+- **Live app (members only):** https://signup.midwestfc.workers.dev
 
-## Organizer (Organizer button at the top of the app)
-- **Games**: every scheduled game per group. Tap one for its board: who's playing, waitlist, money collected/on hold;
-  move people ↑↓; remove (with or without refund); "Add a player" saves them a spot that they must pay for
-  (they get an email; unpaid saved spots are released and you're told); change location, max players, kickoff;
-  cancel the game (refunds everyone); delete an empty game. "Add weekly games" / "Add one game" create new slots.
-- **Members**: join requests at the top (Approve / Decline). Filter by group, search, and "Manage" a person to
-  approve/remove them per group, make them organizer, or block them.
-- **Message**: email + notify everyone on a chosen game's list.
-- **Settings**: per group — price, spots, location, kickoff, sign-up opening day/time, drop deadline; club-wide —
-  hold/offer lengths, overnight pause (applies to games added afterwards).
-- To start Wednesday games: Settings → Wednesday Games (set location/time/price) → Games → Add weekly games.
-- **History**: past games and a payments spreadsheet (CSV) download.
+Built by Emmanuel Klinsmann with Claude as the engineering agent. I set the rules and made the product
+decisions; Claude wrote the code. See the case study for the full story.
 
-## Where things live (all free tiers)
-| Service | What it does | Account |
-|---|---|---|
-| GitHub `klinsmanne/friday-soccer` (private) | the code | klinsmanne |
-| Cloudflare Worker `signup` | website + server + every-minute schedule; redeploys on every push | (owner account) |
-| Supabase project `friday-soccer` | database + sign-in | GitHub login |
-| Stripe "Midwest FC" | payments → your bank | |
-| Gmail ackerman.elitesoccer@gmail.com | sends sign-in codes and notifications (app password) | |
+## What it does
 
-Secrets live only in Cloudflare (Worker `signup` → Settings → Variables and Secrets):
-`SUPABASE_SERVICE_KEY`, `STRIPE_SECRET_KEY`, `GMAIL_APP_PASSWORD`. The Gmail app password is also in
-Supabase → Authentication → Emails → SMTP Settings.
+| When (Central Time) | What happens automatically |
+|---|---|
+| Monday 2:00 PM | Sign-ups open; approved members get an email and a push notification. "Sign up & pay $8.05" holds a spot for 10 minutes during checkout. |
+| Any time | When the game is full, players join the waitlist for free. When a spot opens, the next person gets 2 hours to pay (paused 10 PM–9 AM), then it moves down the line. |
+| Thursday 8:00 PM | Drop deadline. Cards held until now are charged. Earlier drops are refunded in full; later drops only if the spot is filled. |
+| Friday 8:00 PM | Sign-ups close and unfinished payments are released. |
+| Friday 10:00 PM | Kickoff. Afterwards, everyone who played is asked to vote for Man of the Match. |
+| Monday 10:00 AM | Voting closes. The winner gets a trophy badge and a saved spot in next week's game (still paid). |
 
-## Common fixes
-- **Status page shows an error** → the named service's key changed or expired. Replace it in Cloudflare (pencil icon → paste → Deploy).
-- **Nobody gets emails** → Google may have revoked the app password. Create a new one at myaccount.google.com/apppasswords and paste it in both places above.
-- **A payment action failed** → the Organizer dashboard shows a warning; check the payment in the Stripe dashboard. The app retries 10 times automatically.
-- **Change the website address** → add a custom domain on the Cloudflare Worker, then update `SITE_URL` in `wrangler.jsonc` and the Site URL in Supabase → Authentication → URL Configuration. Stripe updates itself.
+The organizer approves members per game group (Friday / Wednesday), and can reorder, add or remove players.
+Cancelling a game refunds everyone. Organizers also see money collected and on hold, message a game's players,
+and download payment history.
 
-## For developers
-- `supabase/schema.sql` — all tables and game rules (safe to re-run in Supabase SQL Editor).
-- `src/` — Cloudflare Worker (checkout, Stripe webhook, schedule, email, push). No dependencies.
-- `public/` — the website (plain HTML/CSS/JS).
-- Tests: `bash tests/run.sh` (needs local Postgres 16) and `node --import ./tests/cf-stub.mjs tests/server_test.mjs`.
-  Local preview: `node tests/devserver.mjs <db>` (fake sign-in code 123456, fake payments).
+## How it's built
+
+- **Front end:** installable mobile web app in plain HTML, CSS and JavaScript (`public/`), with web push.
+- **Server and scheduler:** a Cloudflare Worker (`src/`) that creates Stripe Checkout sessions, verifies Stripe
+  webhooks, sends email over Gmail SMTP and push notifications, and runs a job every minute. No npm dependencies.
+- **Data and rules:** Supabase Postgres (`supabase/schema.sql`). All game rules live in database functions. Every
+  table is locked with row-level security, so the site can only call those functions.
+- **Payments:** card holds before the drop deadline, captured at the deadline; refunds and releases happen automatically.
+- **Sign-in:** passwordless email codes (Supabase Auth).
+- **Cost:** about $0 a month on free tiers. Players cover Stripe's fee in the $8.05 price.
+
+## Tests
+
+- `bash tests/run.sh`: 101 rule checks (sign-ups, holds, waitlist offers, deadlines, refunds, memberships,
+  Man of the Match, permissions) plus a race test where 40 simultaneous sign-ups get exactly 18 spots.
+  Needs a local Postgres 16.
+- `node --import ./tests/cf-stub.mjs tests/server_test.mjs`: 15 server checks (checkout, webhook signatures, email).
+- `node tests/devserver.mjs <database>`: local preview with fake sign-in (code 123456) and fake payments.
+
+## Running your own copy
+
+1. Create a Supabase project and run `supabase/schema.sql` in its SQL editor. Put your organizer email(s) in
+   `settings.admin_email`.
+2. Deploy the Worker with `wrangler deploy`. Set `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SITE_URL` and `GMAIL_USER`
+   in `wrangler.jsonc`, and add the secrets `SUPABASE_SERVICE_KEY`, `STRIPE_SECRET_KEY` and `GMAIL_APP_PASSWORD`
+   in the Cloudflare dashboard. The Worker registers its own Stripe webhook and push keys on first run.
+3. In Supabase Auth, set the Site URL to your site and add a custom SMTP sender.
+
+No secret keys are stored in this repository.

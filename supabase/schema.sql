@@ -14,7 +14,7 @@
 create table if not exists public.settings (
   id                  int primary key default 1 check (id = 1),
   club_name           text not null default 'Midwest FC',
-  admin_email         text not null default 'organizer@example.com',   -- organizer email(s), comma-separated
+  admin_email         text not null default 'organizer@example.com',   -- organizer email(s), comma-separated (set yours after installing)
   hold_minutes        int  not null default 10 check (hold_minutes between 5 and 60),
   offer_minutes       int  not null default 120 check (offer_minutes between 10 and 1440),
   late_offer_minutes  int  not null default 30 check (late_offer_minutes between 5 and 240),

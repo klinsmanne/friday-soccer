@@ -1,4 +1,4 @@
-// Cloudflare settings for the Friday Soccer website + server.
+// Cloudflare settings for the Midwest FC website + server.
 // Secrets (SUPABASE_SERVICE_KEY, STRIPE_SECRET_KEY, GMAIL_APP_PASSWORD) are NOT in this file;
 // they are added in the Cloudflare dashboard under the worker's Settings → Variables and Secrets.
 {
